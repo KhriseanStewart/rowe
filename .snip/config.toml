@@ -1,0 +1,6 @@
+mode = "project"
+
+[filters.global]
+max_lines = 80
+max_line_length = 240
+max_output_bytes = 8192

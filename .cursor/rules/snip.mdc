@@ -1,0 +1,13 @@
+---
+description: Prefix verbose shell commands with snip to cut token spend
+alwaysApply: true
+---
+
+When running shell commands that print a lot (`git`, `npm`, `bun`, `eslint`, `tsc`, tests), prefix with snip so Rowe only sees the useful output:
+
+```
+snip run -- git status
+snip run -- bun run typecheck
+```
+
+Skip the prefix for commands that need the full raw stream, or use `snip proxy -- <command>`.

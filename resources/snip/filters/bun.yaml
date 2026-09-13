@@ -1,0 +1,18 @@
+name: "bun"
+version: 1
+description: "Compact bun test and script output"
+
+match:
+  command: "bun"
+  subcommand: ["test", "run"]
+
+pipeline:
+  - action: "strip_ansi"
+  - action: "remove_lines"
+    pattern: "^\\s*$"
+  - action: "truncate_lines"
+    max: 200
+  - action: "head"
+    n: 60
+
+on_error: "passthrough"

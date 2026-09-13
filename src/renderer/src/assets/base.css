@@ -1,0 +1,245 @@
+:root {
+  --agent-text: rgba(255, 255, 255, 0.92);
+  --agent-text-soft: rgba(255, 255, 255, 0.56);
+  --agent-fill: rgba(255, 255, 255, 0.1);
+  --agent-fill-strong: rgba(255, 255, 255, 0.16);
+  --agent-stroke: rgba(255, 255, 255, 0.14);
+  --agent-accent: #0a84ff;
+  --agent-bubble: rgba(255, 255, 255, 0.1);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --agent-text: rgba(0, 0, 0, 0.88);
+    --agent-text-soft: rgba(0, 0, 0, 0.48);
+    --agent-fill: rgba(0, 0, 0, 0.05);
+    --agent-fill-strong: rgba(0, 0, 0, 0.08);
+    --agent-stroke: rgba(0, 0, 0, 0.08);
+    --agent-accent: #007aff;
+    --agent-bubble: rgba(0, 0, 0, 0.06);
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+}
+
+html[data-surface='tray'] {
+  border-radius: 16px;
+}
+
+html[data-surface='app'],
+html[data-surface='app'] body,
+html[data-surface='app'] #root {
+  background: #161618;
+}
+
+@media (prefers-color-scheme: light) {
+  html[data-surface='app'],
+  html[data-surface='app'] body,
+  html[data-surface='app'] #root {
+    background: #f4f4f5;
+  }
+}
+
+.app-shell {
+  height: 100%;
+  color: var(--agent-text);
+}
+
+html[data-platform='win32'] .app-shell,
+html[data-platform='linux'] .app-shell {
+  background: rgba(22, 22, 24, 0.98);
+}
+
+@media (prefers-color-scheme: light) {
+  html[data-platform='win32'] .app-shell,
+  html[data-platform='linux'] .app-shell {
+    background: rgba(244, 244, 245, 0.98);
+  }
+}
+
+html[data-platform='win32'] .panel-fill,
+html[data-platform='linux'] .panel-fill {
+  background: rgba(28, 28, 30, 0.88);
+}
+
+@media (prefers-color-scheme: light) {
+  html[data-platform='win32'] .panel-fill,
+  html[data-platform='linux'] .panel-fill {
+    background: rgba(246, 246, 246, 0.92);
+  }
+}
+
+body {
+  overflow: hidden;
+  color: var(--agent-text);
+  font-family:
+    -apple-system,
+    BlinkMacSystemFont,
+    'SF Pro Text',
+    'SF Pro Display',
+    'Helvetica Neue',
+    sans-serif;
+  line-height: 1.35;
+  user-select: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+.chat-md {
+  overflow-wrap: anywhere;
+}
+
+.chat-md > :first-child {
+  margin-top: 0;
+}
+
+.chat-md > :last-child {
+  margin-bottom: 0;
+}
+
+.chat-md p {
+  margin: 0;
+}
+
+.chat-md p + p {
+  margin-top: 0.45em;
+}
+
+.chat-md strong {
+  font-weight: 650;
+}
+
+.chat-md em {
+  font-style: italic;
+}
+
+.chat-md ul,
+.chat-md ol {
+  margin: 0.4em 0;
+  padding-left: 1.15em;
+}
+
+.chat-md ul {
+  list-style: disc;
+}
+
+.chat-md ol {
+  list-style: decimal;
+}
+
+.chat-md li + li {
+  margin-top: 0.2em;
+}
+
+.chat-md li > p {
+  margin: 0;
+}
+
+.chat-md h1,
+.chat-md h2,
+.chat-md h3,
+.chat-md h4 {
+  margin: 0.55em 0 0.25em;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.chat-md h1 {
+  font-size: 1.12em;
+}
+
+.chat-md h2 {
+  font-size: 1.05em;
+}
+
+.chat-md h3,
+.chat-md h4 {
+  font-size: 1em;
+}
+
+.chat-md code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.86em;
+  padding: 0.08em 0.32em;
+  border-radius: 5px;
+  background: var(--agent-fill);
+}
+
+.chat-md pre {
+  margin: 0.5em 0;
+  padding: 0.55em 0.7em;
+  overflow-x: auto;
+  border-radius: 8px;
+  background: var(--agent-fill);
+}
+
+.chat-md pre code {
+  padding: 0;
+  background: none;
+}
+
+.chat-md a {
+  color: var(--agent-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.chat-md blockquote {
+  margin: 0.4em 0;
+  padding-left: 0.7em;
+  border-left: 2px solid var(--agent-stroke);
+  color: var(--agent-text-soft);
+}
+
+.chat-md hr {
+  margin: 0.55em 0;
+  border: 0;
+  border-top: 1px solid var(--agent-stroke);
+}
+
+.chat-md table {
+  margin: 0.45em 0;
+  border-collapse: collapse;
+  font-size: 0.95em;
+}
+
+.chat-md th,
+.chat-md td {
+  padding: 0.2em 0.45em;
+  border: 1px solid var(--agent-stroke);
+  text-align: left;
+}
+
+.chat-md-user a {
+  color: inherit;
+}
+
+.chat-md-user code,
+.chat-md-user pre,
+.chat-md-user th,
+.chat-md-user td {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.22);
+}
+
+.chat-md-user blockquote {
+  border-left-color: rgba(255, 255, 255, 0.35);
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.chat-md-user hr {
+  border-top-color: rgba(255, 255, 255, 0.22);
+}

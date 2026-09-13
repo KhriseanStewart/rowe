@@ -1,0 +1,12 @@
+@import 'tailwindcss';
+@import './base.css';
+
+@theme inline {
+  --color-agent-text: var(--agent-text);
+  --color-agent-text-soft: var(--agent-text-soft);
+  --color-agent-fill: var(--agent-fill);
+  --color-agent-fill-strong: var(--agent-fill-strong);
+  --color-agent-stroke: var(--agent-stroke);
+  --color-agent-accent: var(--agent-accent);
+  --color-agent-bubble: var(--agent-bubble);
+}
