@@ -4,7 +4,10 @@ import VoiceOrb from './components/VoiceOrb'
 import { getUserPlan, planAllowsAsk, syncUsageAfterAsk } from './auth/plan'
 import { useFirebaseUser } from './auth/useFirebaseUser'
 import AgentTrail from './components/AgentTrail'
+import ToolConfirmCards from './components/ToolConfirmCards'
+import OsActionToast from './components/OsActionToast'
 import EditProposals, { type ChatFileEdit } from './components/EditProposals'
+import { formatAskError } from './lib/formatAskError'
 import { parseRoweEditsFromText } from './lib/parseRoweEdits'
 
 type Message = {
@@ -402,7 +405,7 @@ export default function TrayApp(): React.JSX.Element {
         }
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Something went wrong'
+      const message = formatAskError(error)
       setMessages((current) =>
         current.map((item) =>
           item.id === assistantId
@@ -782,7 +785,15 @@ export default function TrayApp(): React.JSX.Element {
             Type / for commands · /agent name · /files · /hide ·{' '}
             {window.api.platform === 'darwin' ? '⌃⌘S' : 'Ctrl+Alt+S'} to show
           </p>
-        ) : messages.length === 0 ? null : (
+        ) : messages.length === 0 ? (
+          <>
+            <OsActionToast compact />
+            <ToolConfirmCards compact />
+          </>
+        ) : (
+          <>
+          <OsActionToast compact />
+          <ToolConfirmCards compact />
           <div className="tray-messages">
             {messages.map((message, index) => {
               const parsed =
@@ -840,6 +851,7 @@ export default function TrayApp(): React.JSX.Element {
               )
             })}
           </div>
+          </>
         )}
       </div>
     </div>

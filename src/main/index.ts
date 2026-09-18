@@ -12,6 +12,11 @@ import {
 } from './cursor'
 import { getSnipGain, prepareSnipRuntime } from './snip'
 import { getSettings, updateSettings, planAllowsAskLocal, recordLocalPlanUsage, type LocalPlan } from './settings'
+import { listAuditLog } from './tools/audit-log'
+import { confirmTool, invokeTool } from './tools/router'
+import { getPermissionStatus } from './tools/permissions'
+import { getToolStreamPort, startToolStreamServer } from './tools/stream-server'
+import type { ToolCallRequest } from './tools/types'
 import {
   connectGithub,
   disconnectGithub,
@@ -33,7 +38,7 @@ import {
   setProjectSelected
 } from './rag/projects'
 import { closeRag, migrateRag } from './rag/db'
-import { answerWithRag, ragIsConfigured } from './rag/system-ai'
+import { answerWithRag, ragIsConfigured, wantsFileMutation } from './rag/system-ai'
 import { ragEvents } from './rag/events'
 import { agentProgress } from './agent-progress'
 import { searchRag } from './rag/retrieve'
@@ -192,6 +197,11 @@ function authStatus(): {
 }
 
 app.whenReady().then(() => {
+  try {
+    startToolStreamServer()
+  } catch (error) {
+    console.warn('Tool stream server failed to start', error)
+  }
   const snip = prepareSnipRuntime()
   if (snip) {
     console.log(`Rowe bundled snip at ${snip.snipBin}`)
@@ -237,6 +247,62 @@ app.whenReady().then(() => {
   ipcMain.handle('tray:expanded', () => isTrayExpanded())
 
   ipcMain.handle('auth:status', () => authStatus())
+
+  ipcMain.handle('settings:get-chat-model', () => getSettings().openRouterChatModel ?? null)
+
+  ipcMain.handle('settings:get-trusted-mode', () => Boolean(getSettings().trustedMode))
+
+  ipcMain.handle('settings:set-trusted-mode', (_event, enabled: boolean) => {
+    updateSettings({ trustedMode: Boolean(enabled) })
+    return Boolean(getSettings().trustedMode)
+  })
+
+  ipcMain.handle('audit:list', (_event, limit?: number) =>
+    listAuditLog(typeof limit === 'number' ? limit : 50)
+  )
+
+  ipcMain.handle('permissions:status', () => getPermissionStatus())
+
+  ipcMain.handle('tools:invoke', (event, request: ToolCallRequest) =>
+    invokeTool(request || { tool: '' }, { sender: event.sender })
+  )
+
+  ipcMain.handle(
+    'tools:confirm',
+    (_event, input: { requestId: string; approved: boolean }) =>
+      confirmTool(String(input?.requestId || ''), Boolean(input?.approved))
+  )
+
+  ipcMain.handle('tools:reveal-in-folder', (_event, filePath: string) => {
+    const target = typeof filePath === 'string' ? filePath : ''
+    if (!target) return false
+    shell.showItemInFolder(target)
+    return true
+  })
+
+  ipcMain.handle('tools:stream-port', () => {
+    startToolStreamServer()
+    return getToolStreamPort()
+  })
+
+  ipcMain.handle('permissions:open-settings', (_event, kind: string) => {
+    if (kind === 'screenRecording') {
+      void shell.openExternal(
+        'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'
+      )
+    } else if (kind === 'accessibility') {
+      void shell.openExternal(
+        'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'
+      )
+    }
+    return true
+  })
+
+  ipcMain.handle('settings:set-chat-model', (_event, model: string) => {
+    const next = typeof model === 'string' ? model.trim().slice(0, 200) : ''
+    updateSettings({ openRouterChatModel: next || undefined })
+    return getSettings().openRouterChatModel ?? null
+  })
 
   ipcMain.handle('profile:update-context', (_event, context: string) => {
     updateSettings({ userProfileContext: context.trim().slice(0, 2000) })
@@ -342,6 +408,42 @@ app.whenReady().then(() => {
               ? `Access to “${accessTarget.targetLabel}” was not granted. Use /files when you are ready to add that folder.`
               : 'Folder access was not granted. Use /files when you are ready to add a folder.'
           )
+        }
+      }
+
+      // One-time write permission for mutation asks (create/edit/delete). After Accept,
+      // subsequent writes reuse the granted workspace root(s).
+      if (wantsFileMutation(question)) {
+        const writeTarget =
+          accessTarget?.defaultPath ||
+          getWorkspaceRoots()[0] ||
+          undefined
+        if (writeTarget && !isPathGranted(writeTarget)) {
+          const writeAccess = await requestTrayFileAccess(event.sender, {
+            question,
+            targetLabel: accessTarget?.targetLabel || 'project folder',
+            defaultPath: writeTarget,
+            reason:
+              'Rowe needs write access to apply your requested file changes. After you Allow, it can write under this folder.',
+            wantFile: false
+          })
+          if (!writeAccess.granted) {
+            throw new Error(
+              'Write access was not granted. Allow the project folder once so Rowe can edit files.'
+            )
+          }
+        } else if (!trayFileAccessGranted()) {
+          const writeAccess = await requestTrayFileAccess(event.sender, {
+            question,
+            reason:
+              'Rowe needs folder write access to apply your requested file changes. After you Allow, it can write under that folder.',
+            wantFile: false
+          })
+          if (!writeAccess.granted) {
+            throw new Error(
+              'Write access was not granted. Allow a project folder once so Rowe can edit files.'
+            )
+          }
         }
       }
       let scopedIds = projectIds
@@ -719,3 +821,4 @@ app.on('window-all-closed', () => {
     app.quit()
   }
 })
+

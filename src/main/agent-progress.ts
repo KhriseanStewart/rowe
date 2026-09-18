@@ -8,6 +8,7 @@ export type AgentProgressPhase =
   | 'shell'
   | 'indexing'
   | 'task'
+  | 'tool'
 
 export type AgentProgressEvent = {
   phase: AgentProgressPhase

@@ -133,6 +133,7 @@ export function resolveEditPath(pathValue: string, preferHints: string[] = []): 
   }
 
   const leaf = basename(raw).toLowerCase()
+  const leafStem = leaf.replace(/\.[^.]+$/, '')
   const normalizedRel = raw.replace(/\\/g, '/').toLowerCase()
   for (const root of roots) {
     candidates.push(...shallowFindAllByRelative(root, normalizedRel, 8))
@@ -140,6 +141,14 @@ export function resolveEditPath(pathValue: string, preferHints: string[] = []): 
   if (!candidates.length) {
     for (const root of roots) {
       candidates.push(...shallowFindAllFiles(root, leaf, 8))
+    }
+  }
+  // A user commonly says "the README file" rather than "README.md". Treat
+  // that as an exact filename-stem match, not a fuzzy search: this also works
+  // for names such as "Dockerfile" or "settings" without privileging README.
+  if (!candidates.length && leafStem === leaf) {
+    for (const root of roots) {
+      candidates.push(...shallowFindAllFilesByStem(root, leafStem, 8))
     }
   }
 
@@ -236,6 +245,33 @@ function shallowFindAllFiles(root: string, leafLower: string, maxDepth: number):
       if (entry.isDirectory() && current.depth < maxDepth) {
         stack.push({ dir: next, depth: current.depth + 1 })
       }
+    }
+  }
+  return found
+}
+
+function shallowFindAllFilesByStem(root: string, stemLower: string, maxDepth: number): string[] {
+  const found: string[] = []
+  const stack: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }]
+  const started = Date.now()
+  while (stack.length) {
+    if (Date.now() - started > 2000 || found.length >= 40) break
+    const current = stack.pop()
+    if (!current || current.depth > maxDepth) continue
+    let entries
+    try {
+      entries = readdirSync(current.dir, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'dist' || entry.name === 'build') continue
+      const next = join(current.dir, entry.name)
+      if (entry.isFile()) {
+        const entryStem = entry.name.toLowerCase().replace(/\.[^.]+$/, '')
+        if (entryStem === stemLower && isUsableProjectFile(next)) found.push(resolve(next))
+      }
+      if (entry.isDirectory() && current.depth < maxDepth) stack.push({ dir: next, depth: current.depth + 1 })
     }
   }
   return found

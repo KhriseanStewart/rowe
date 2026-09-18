@@ -194,6 +194,93 @@ const api = {
   copyJarvisDraft: (): Promise<string> => ipcRenderer.invoke('jarvis:copy'),
   getSnipGain: (): Promise<SnipGain> => ipcRenderer.invoke('snip:gain'),
   getAuthStatus: (): Promise<AuthStatus> => ipcRenderer.invoke('auth:status'),
+  getChatModel: (): Promise<string | null> => ipcRenderer.invoke('settings:get-chat-model'),
+  setChatModel: (model: string): Promise<string | null> =>
+    ipcRenderer.invoke('settings:set-chat-model', model),
+  getTrustedMode: (): Promise<boolean> => ipcRenderer.invoke('settings:get-trusted-mode'),
+  setTrustedMode: (enabled: boolean): Promise<boolean> =>
+    ipcRenderer.invoke('settings:set-trusted-mode', enabled),
+  listAuditLog: (limit?: number): Promise<
+    Array<{
+      id: string
+      at: number
+      tool: string
+      action: string
+      path?: string
+      status: string
+      detail?: string
+    }>
+  > => ipcRenderer.invoke('audit:list', limit),
+  getPermissionStatus: (): Promise<{
+    screenRecording: 'granted' | 'denied' | 'unknown'
+    accessibility: 'granted' | 'denied' | 'unknown'
+  }> => ipcRenderer.invoke('permissions:status'),
+  openPermissionSettings: (kind: 'screenRecording' | 'accessibility'): Promise<boolean> =>
+    ipcRenderer.invoke('permissions:open-settings', kind),
+  invokeTool: (request: {
+    tool: string
+    params?: Record<string, unknown>
+    requestId?: string
+  }): Promise<{
+    requestId: string
+    status: 'success' | 'error' | 'needs_permission' | 'needs_confirmation'
+    result?: Record<string, unknown>
+    error?: string
+    confirmation?: { title: string; summary: string; danger?: boolean; preview?: Record<string, unknown> }
+  }> => ipcRenderer.invoke('tools:invoke', request),
+  getToolStreamPort: (): Promise<number> => ipcRenderer.invoke('tools:stream-port'),
+  onOsPreview: (
+    listener: (payload: {
+      tool: string
+      label: string
+      x?: number
+      y?: number
+      durationMs?: number
+    }) => void
+  ): (() => void) => {
+    const handler = (
+      _event: unknown,
+      payload: {
+        tool: string
+        label: string
+        x?: number
+        y?: number
+        durationMs?: number
+      }
+    ): void => listener(payload)
+    ipcRenderer.on('tools:os-preview', handler)
+    return () => ipcRenderer.removeListener('tools:os-preview', handler)
+  },
+  onToolConfirm: (
+    listener: (payload: {
+      requestId: string
+      status: 'needs_confirmation'
+      confirmation?: { title: string; summary: string; danger?: boolean; preview?: Record<string, unknown> }
+      result?: Record<string, unknown>
+      error?: string
+    }) => void
+  ): (() => void) => {
+    const handler = (
+      _event: unknown,
+      payload: {
+        requestId: string
+        status: 'needs_confirmation'
+        confirmation?: { title: string; summary: string; danger?: boolean; preview?: Record<string, unknown> }
+        result?: Record<string, unknown>
+        error?: string
+      }
+    ): void => listener(payload)
+    ipcRenderer.on('tools:needs-confirm', handler)
+    return () => ipcRenderer.removeListener('tools:needs-confirm', handler)
+  },
+  confirmTool: (requestId: string, approved: boolean): Promise<{
+    requestId: string
+    status: 'success' | 'error' | 'needs_permission' | 'needs_confirmation'
+    result?: Record<string, unknown>
+    error?: string
+  }> => ipcRenderer.invoke('tools:confirm', { requestId, approved }),
+  revealInFolder: (filePath: string): Promise<boolean> =>
+    ipcRenderer.invoke('tools:reveal-in-folder', filePath),
   updateProfileContext: (context: string): Promise<void> =>
     ipcRenderer.invoke('profile:update-context', context),
   updatePlan: (plan: {

@@ -7,7 +7,10 @@ import { syncTokensSaved } from './auth/profile'
 import ChatMarkdown from './components/ChatMarkdown'
 import ChatSources, { splitMessageSources, uniqueCitations, type ChatCitation } from './components/ChatSources'
 import AgentTrail from './components/AgentTrail'
+import ToolConfirmCards from './components/ToolConfirmCards'
+import OsActionToast from './components/OsActionToast'
 import EditProposals, { type ChatFileEdit } from './components/EditProposals'
+import { formatAskError } from './lib/formatAskError'
 import { parseRoweEditsFromText } from './lib/parseRoweEdits'
 import ProjectLibrary, { type ReferenceProject } from './components/ProjectLibrary'
 import RoweMark from './components/RoweMark'
@@ -526,7 +529,7 @@ export default function App(): React.JSX.Element {
       }
       setThreads(await window.api.listHistory())
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Something went wrong'
+      const message = formatAskError(error)
       setMessages((current) =>
         current.map((item) =>
           item.id === assistantId
@@ -982,6 +985,8 @@ export default function App(): React.JSX.Element {
               )}
             </div>
 
+            <OsActionToast />
+            <ToolConfirmCards />
             {(messages.length > 0 || selectedProjects.length > 0) ? (
             <div className="mx-auto mb-2 flex w-[min(100%-48px,48rem)] items-center gap-2 overflow-auto pb-0.5 text-[12px] text-agent-text-soft">
               <span className="shrink-0">Using:</span>

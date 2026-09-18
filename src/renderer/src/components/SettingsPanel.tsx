@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react'
 import type { User } from 'firebase/auth'
 import RoweMark from './RoweMark'
+import AuditLogPanel from './AuditLogPanel'
+import PermissionExplainer from './PermissionExplainer'
+import type { PermissionStatus } from '../lib/toolUi'
 import {
   formatUsd,
   getUserPlan,
@@ -18,12 +21,35 @@ type SettingsPanelProps = {
   onClose: () => void
 }
 
+const FREE_MODEL_PRESETS = [
+  { id: 'openai/gpt-oss-20b:free', label: 'GPT-OSS 20B (free)' },
+  { id: 'meta-llama/llama-3.2-3b-instruct:free', label: 'Llama 3.2 3B (free)' },
+  { id: 'google/gemma-4-26b-a4b-it:free', label: 'Gemma 4 26B (free)' },
+  { id: 'nvidia/nemotron-3-nano-30b-a3b:free', label: 'Nemotron Nano 30B (free)' },
+  { id: 'openrouter/free', label: 'OpenRouter free router (rate-limits hard)' }
+] as const
+
+const PAID_MODEL_PRESETS = [
+  { id: 'openai/gpt-4o-mini', label: 'GPT-4o mini' },
+  { id: 'anthropic/claude-3.5-sonnet', label: 'Claude 3.5 Sonnet' },
+  { id: 'google/gemini-2.0-flash', label: 'Gemini 2.0 Flash' }
+] as const
+
 export default function SettingsPanel({ user, onClose }: SettingsPanelProps): React.JSX.Element {
   const [plan, setPlan] = useState<UserPlan | null>(null)
   const [logs, setLogs] = useState<UsageLogEntry[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
+  const [chatModel, setChatModel] = useState('')
+  const [modelSaved, setModelSaved] = useState(false)
+  const [modelBusy, setModelBusy] = useState(false)
+  const [trustedMode, setTrustedMode] = useState(false)
+  const [trustedBusy, setTrustedBusy] = useState(false)
+  const [permStatus, setPermStatus] = useState<PermissionStatus>({
+    screenRecording: 'unknown',
+    accessibility: 'unknown'
+  })
 
   useEffect(() => {
     if (!user) {
@@ -54,6 +80,26 @@ export default function SettingsPanel({ user, onClose }: SettingsPanelProps): Re
     }
   }, [user])
 
+  useEffect(() => {
+    let cancelled = false
+    void Promise.all([
+      window.api.getChatModel().catch(() => null),
+      window.api.getTrustedMode().catch(() => false),
+      window.api.getPermissionStatus().catch(() => ({
+        screenRecording: 'unknown' as const,
+        accessibility: 'unknown' as const
+      }))
+    ]).then(([model, trusted, perms]) => {
+      if (cancelled) return
+      setChatModel(model || '')
+      setTrustedMode(Boolean(trusted))
+      setPermStatus(perms)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   const choosePlan = async (planId: PlanId): Promise<void> => {
     if (!user) return
     setBusy(true)
@@ -65,6 +111,23 @@ export default function SettingsPanel({ user, onClose }: SettingsPanelProps): Re
       setError(caught instanceof Error ? caught.message : 'Could not update plan')
     } finally {
       setBusy(false)
+    }
+  }
+
+  const saveChatModel = async (value?: string): Promise<void> => {
+    const next = (value ?? chatModel).trim()
+    setModelBusy(true)
+    setError('')
+    setModelSaved(false)
+    try {
+      const saved = await window.api.setChatModel(next)
+      setChatModel(saved || '')
+      setModelSaved(true)
+      window.setTimeout(() => setModelSaved(false), 1600)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not save model')
+    } finally {
+      setModelBusy(false)
     }
   }
 
@@ -96,6 +159,100 @@ export default function SettingsPanel({ user, onClose }: SettingsPanelProps): Re
           <p className="ui-copy">Loading plan…</p>
         ) : (
           <div className="ui-stack">
+            <section className="ui-section desktop-settings-block">
+              <p className="ui-section-title">System AI model</p>
+              <p className="ui-copy" style={{ marginTop: 0 }}>
+                Prefer a pinned free OpenRouter model over the rate-limited openrouter/free router. Leave empty to use env / default.
+              </p>
+              <label className="mt-3 block text-[12px] font-semibold text-agent-text-soft" htmlFor="chat-model">
+                Model id
+              </label>
+              <div className="mt-1.5 flex flex-wrap gap-2">
+                <input
+                  id="chat-model"
+                  className="ui-input min-w-0 flex-1"
+                  value={chatModel}
+                  placeholder="e.g. openai/gpt-oss-20b:free"
+                  disabled={modelBusy}
+                  onChange={(event) => setChatModel(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') void saveChatModel()
+                  }}
+                />
+                <button
+                  type="button"
+                  className="ui-btn ui-btn-primary shrink-0"
+                  disabled={modelBusy}
+                  onClick={() => void saveChatModel()}
+                >
+                  {modelBusy ? 'Saving…' : modelSaved ? 'Saved' : 'Save'}
+                </button>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {FREE_MODEL_PRESETS.map((preset) => (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    className={`desktop-chip rounded-full px-2.5 py-1 text-[11px] font-semibold ${
+                      chatModel === preset.id ? 'is-active' : ''
+                    }`}
+                    disabled={modelBusy}
+                    onClick={() => void saveChatModel(preset.id)}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+              <p className="mt-3 text-[11px] font-semibold text-agent-text-soft">With credits</p>
+              <div className="mt-1.5 flex flex-wrap gap-2">
+                {PAID_MODEL_PRESETS.map((preset) => (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    className="desktop-chip rounded-full px-2.5 py-1 text-[11px] font-semibold"
+                    disabled={modelBusy}
+                    onClick={() => void saveChatModel(preset.id)}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <section className="ui-section desktop-settings-block">
+              <p className="ui-section-title">Trusted mode</p>
+              <p className="ui-copy" style={{ marginTop: 0 }}>
+                When on, Rowe can apply file writes under your granted folders without Accept/Decline
+                each time. Actions are still logged in Tool audit.
+              </p>
+              <label className="trusted-toggle">
+                <input
+                  type="checkbox"
+                  checked={trustedMode}
+                  disabled={trustedBusy}
+                  onChange={(event) => {
+                    const next = event.target.checked
+                    setTrustedBusy(true)
+                    void window.api
+                      .setTrustedMode(next)
+                      .then((saved) => setTrustedMode(Boolean(saved)))
+                      .catch(() => setTrustedMode(!next))
+                      .finally(() => setTrustedBusy(false))
+                  }}
+                />
+                <span>Skip write confirms this session</span>
+              </label>
+            </section>
+
+            <PermissionExplainer
+              status={permStatus}
+              onOpenSettings={(kind) => {
+                void window.api.openPermissionSettings(kind)
+              }}
+            />
+
+            <AuditLogPanel />
+
             <section className="ui-section desktop-settings-block">
               <p className="ui-section-title">Current plan</p>
               {plan ? (

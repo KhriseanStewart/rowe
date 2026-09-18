@@ -22,6 +22,12 @@ function stripRoweEditFences(value: string): string {
     .replace(/```rowe-tool[^\n]*\r?\n?[\s\S]*?```/gi, '')
     .replace(/```rowe-tasks[^\n]*\r?\n?[\s\S]*?```/gi, '')
     .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '')
+    .replace(/<dots_function_call>[\s\S]*?<\/dots_function_call>/gi, '')
+    .replace(/<dots_function_call>/gi, '')
+    .replace(/`<\/?dots_function_call\b[^>]*>`/gi, '')
+    .replace(/<\/?dots_function_call\b[^>]*>/gi, '')
+    .replace(/&lt;\/?dots_function_call\b[^&]*&gt;/gi, '')
+    .replace(/(?:^|\n)\s*dots_function_call\s*(?=\n|$)/gi, '')
     .replace(/<\/?tool_call>|<\/?arg_key>|<\/?arg_value>|<\/?parameter>|<\/?parameters>/gi, '')
     .replace(/\bresponse\s+safety\s*:\s*\w+/gi, '')
     .replace(/\b(?:user\s+|model\s+)?safety\s*:\s*\w+/gi, '')
@@ -37,6 +43,42 @@ function stripRoweEditFences(value: string): string {
 function linkCitations(text: string): string {
   return text.replace(/(?<![A-Za-z0-9_/])\[(\d{1,2})\]/g, '[$1](#cite-$1)')
 }
+
+function ErrorBlock({ code }: { code: string }): React.JSX.Element {
+  const [copied, setCopied] = useState(false)
+  const copyError = async (): Promise<void> => {
+    const value = code.trim()
+    if (!value) return
+    try {
+      await navigator.clipboard.writeText(value)
+    } catch {
+      const area = window.document.createElement('textarea')
+      area.value = value
+      area.style.position = 'fixed'
+      area.style.left = '-9999px'
+      window.document.body.appendChild(area)
+      area.select()
+      window.document.execCommand('copy')
+      area.remove()
+    }
+    setCopied(true)
+    window.setTimeout(() => setCopied(false), 1400)
+  }
+  return (
+    <div className="chat-error-block">
+      <div className="chat-error-block-bar">
+        <span className="chat-error-block-label">ERROR — paste this if it happens again</span>
+        <button type="button" className="chat-error-block-copy" onClick={() => void copyError()}>
+          {copied ? 'Copied' : 'Copy error'}
+        </button>
+      </div>
+      <pre className="chat-error-block-pre">
+        <code>{code}</code>
+      </pre>
+    </div>
+  )
+}
+
 
 function ChatMarkdown({
   text,
@@ -172,6 +214,22 @@ function ChatMarkdown({
                   {children}
                 </a>
               )
+            },
+            pre: ({ children, ...props }) => {
+              const child = Array.isArray(children) ? children[0] : children
+              const className =
+                child && typeof child === 'object' && 'props' in child
+                  ? String((child as { props?: { className?: string } }).props?.className || '')
+                  : ''
+              const isError = /language-error|language-ERROR/i.test(className)
+              if (isError) {
+                const code =
+                  child && typeof child === 'object' && 'props' in child
+                    ? String((child as { props?: { children?: unknown } }).props?.children || '')
+                    : ''
+                return <ErrorBlock code={code} />
+              }
+              return <pre {...props}>{children}</pre>
             }
           }}
         >

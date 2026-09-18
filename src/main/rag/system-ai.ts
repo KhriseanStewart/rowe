@@ -7,7 +7,14 @@ import {
   extractToolCalls,
   executeFsTool,
   formatToolResultsForModel,
-  fulfillSimpleFileEdit,
+  fulfillPendingMutation,
+  fulfillClearFileEdit,
+  fulfillExplicitTextFileRewrite,
+  writeResolvedFile,
+  extractNamedWriteTarget,
+  isGeneratedDocumentWriteRequest,
+  isPrimarilyDevCommandAsk,
+  wantsFileMutation,
   type FsToolResult
 } from '../fs-tools'
 import { reportAgentProgress } from '../agent-progress'
@@ -141,6 +148,10 @@ export async function answerWithRag(
       break
     } catch (error) {
       lastError = error
+      console.warn(
+        `[rowe:llm] ${gateway.name} failed; ${requests.length > 1 ? 'trying next gateway' : 'no fallback'}`,
+        error instanceof Error ? error.message : error
+      )
       if (text) throw error
     }
   }
@@ -187,10 +198,11 @@ function extractTaskPlan(text: string): { text: string; tasks: Array<{ id: strin
 }
 
 
-function wantsFileMutation(question: string): boolean {
-  return /\b(add|edit|update|change|write|create|delete|remove|rename|fix|insert|comment|fix_file|create_file|make)\b/i.test(
-    question
+function extractPathFromQuestion(question: string): string | undefined {
+  const match = question.match(
+    /\b([\w./-]+\.(?:dart|tsx?|jsx?|py|swift|kt|java|go|rs|css|scss|html|md|json|yml|yaml))\b/i
   )
+  return match?.[1]
 }
 
 function hasMutatingTool(results: FsToolResult[]): boolean {
@@ -204,6 +216,24 @@ function hasMutatingTool(results: FsToolResult[]): boolean {
   )
 }
 
+function hasCompletedDevCommand(question: string, results: FsToolResult[]): boolean {
+  if (!isPrimarilyDevCommandAsk(question)) return false
+  return results.some((item) => item.ok && (item.name === 'run_shell' || item.name.startsWith('github')))
+}
+
+function lastFailedMutation(results: FsToolResult[]): FsToolResult | undefined {
+  return [...results]
+    .reverse()
+    .find(
+      (item) =>
+        !item.ok &&
+        (item.name === 'write_file' ||
+          item.name === 'patch_file' ||
+          item.name === 'mkdir' ||
+          item.name === 'delete_path')
+    )
+}
+
 
 function stripSafetyMeta(text: string): string {
   return text
@@ -211,6 +241,140 @@ function stripSafetyMeta(text: string): string {
     .replace(/\bresponse\s+safety\s*:\s*\w+/gi, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
+}
+
+
+function isLlmTransportError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /is unavailable:|fetch failed|connection failed|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|network|aborted|socket/i.test(
+    message
+  )
+}
+
+function formatPasteableFsError(result: FsToolResult): string {
+  const data = (result.data || {}) as { error?: string; stack?: string }
+  return [
+    '```error',
+    `ERROR: ${result.summary}`,
+    result.path ? `path: ${result.path}` : '',
+    result.name ? `tool: ${result.name}` : '',
+    data.error ? `detail: ${data.error}` : '',
+    data.stack ? `stack: ${data.stack}` : '',
+    '```'
+  ]
+    .filter(Boolean)
+    .join('\n')
+}
+
+async function generateAndWriteDocument(
+  gateway: Gateway,
+  input: RagAnswerInput,
+  parts: {
+    context: string
+    hasMaterials: boolean
+    referenceBrief: string
+    hasSubject: boolean
+  }
+): Promise<{ result: FsToolResult; usage?: LlmUsage } | null> {
+  if (!isGeneratedDocumentWriteRequest(input.question)) return null
+  const target = extractNamedWriteTarget(input.question)
+  if (!target) return null
+
+  reportAgentProgress({
+    phase: 'writing',
+    message: `Generating content for ${target}…`,
+    ok: false
+  })
+
+  const prompt =
+    `Write the full file contents for "${target}" based on this request:\n\n${input.question}\n\n` +
+    `Rules:\n` +
+    `- Output ONLY the file body. No markdown fence, no commentary, no tool tags.\n` +
+    `- If this is a README, include project name, what it does, setup, and key commands when known from context.\n` +
+    `- Prefer facts from retrieved project materials; do not invent private credentials.\n`
+
+  try {
+    const pass = await streamGateway(
+      gateway,
+      {
+        ...input,
+        history: input.history,
+        question: prompt,
+        liveContext: input.liveContext,
+        enableFsTools: false
+      },
+      parts.context,
+      parts.hasMaterials,
+      parts.referenceBrief,
+      parts.hasSubject
+    )
+    const content = stripSafetyMeta(pass.text)
+      .replace(/^```[\w-]*\r?\n/, '')
+      .replace(/\r?\n```\s*$/, '')
+      .trim()
+    if (!content || content.length < 20) {
+      const summary = `Could not generate usable content for ${target}. The model returned an empty or too-short body (${content.length} chars).`
+      console.error('[rowe:fs]', JSON.stringify({ where: 'generateAndWriteDocument', target, summary }, null, 2))
+      return {
+        result: {
+          name: 'write_file',
+          ok: false,
+          summary
+        },
+        usage: pass.usage
+      }
+    }
+    try {
+      const written = await writeResolvedFile(target, content, {
+        preferHints: input.preferHints,
+        sender: input.sender
+      })
+      if (!written.ok) {
+        console.error(
+          '[rowe:fs]',
+          JSON.stringify(
+            {
+              where: 'generateAndWriteDocument.write',
+              target,
+              path: written.path,
+              summary: written.summary,
+              data: written.data
+            },
+            null,
+            2
+          )
+        )
+      }
+      return { result: written, usage: pass.usage }
+    } catch (writeError) {
+      const message = writeError instanceof Error ? writeError.message : String(writeError)
+      const stack = writeError instanceof Error ? writeError.stack : undefined
+      console.error('[rowe:fs] generateAndWriteDocument write threw', message, stack)
+      return {
+        result: {
+          name: 'write_file',
+          ok: false,
+          summary: `Could not write ${target}: ${message}`,
+          data: { error: message, stack }
+        },
+        usage: pass.usage
+      }
+    }
+  } catch (error) {
+    // Transport failures must bubble so answerWithRag can try the next gateway.
+    if (isLlmTransportError(error)) throw error
+    const message = error instanceof Error ? error.message : 'Generation failed'
+    const stack = error instanceof Error ? error.stack : undefined
+    console.error('[rowe:fs] generateAndWriteDocument failed', message, stack)
+    return {
+      result: {
+        name: 'write_file',
+        ok: false,
+        summary: `Could not write ${target}: ${message}`,
+        data: { error: message, stack }
+      }
+    }
+  }
 }
 
 async function runWithOptionalFsTools(
@@ -229,6 +393,59 @@ async function runWithOptionalFsTools(
   let usage: LlmUsage | undefined
 
   reportAgentProgress({ phase: 'thinking', message: 'Working on your request…' })
+
+  // Clearing a named file is unambiguous. Execute it directly instead of
+  // relying on a provider to emit tool syntax after first describing the file.
+  const directMutation =
+    (await fulfillClearFileEdit(input.question, {
+      preferHints,
+      sender: input.sender
+    })) ||
+    (await fulfillExplicitTextFileRewrite(input.question, {
+      preferHints,
+      sender: input.sender
+    }))
+  if (directMutation) {
+    toolResults.push(directMutation)
+    reportAgentProgress({ phase: 'writing', message: directMutation.summary, ok: directMutation.ok })
+    input.onDelta(`\n\n${directMutation.ok ? '✓' : '✗'} ${directMutation.summary}`)
+    return {
+      text: directMutation.ok
+        ? `Done — wrote the change to \`${directMutation.path || 'the file'}\`.`
+        : `Could not write the file: ${directMutation.summary}`,
+      usage,
+      toolResults
+    }
+  }
+
+  const generatedDoc = await generateAndWriteDocument(gateway, input, parts)
+  if (generatedDoc) {
+    usage = mergeUsage(usage, generatedDoc.usage)
+    toolResults.push(generatedDoc.result)
+    reportAgentProgress({
+      phase: 'writing',
+      message: generatedDoc.result.summary,
+      ok: generatedDoc.result.ok
+    })
+    if (generatedDoc.result.ok) {
+      input.onDelta(`\n\n✓ ${generatedDoc.result.summary}`)
+      return {
+        text: `Done — wrote \`${generatedDoc.result.path || extractNamedWriteTarget(input.question) || 'the file'}\`.`,
+        usage,
+        toolResults
+      }
+    }
+    const errBlock = formatPasteableFsError(generatedDoc.result)
+    input.onDelta(`\n\n✗ ${generatedDoc.result.summary}\n\n${errBlock}`)
+    return {
+      text:
+        `Could not complete the write.\n\n` +
+        errBlock +
+        `\n\nCopy the ERROR block above and paste it here if you want help debugging.`,
+      usage,
+      toolResults
+    }
+  }
 
   // First pass (may request tools).
   let pass = await streamGateway(
@@ -251,7 +468,7 @@ async function runWithOptionalFsTools(
     { role: 'assistant', content: pass.text }
   ]
 
-  for (let step = 0; step < 6; step += 1) {
+  for (let step = 0; step < 8; step += 1) {
     const planned = extractTaskPlan(pass.text)
     if (planned.tasks.length) {
       for (const task of planned.tasks) {
@@ -260,63 +477,191 @@ async function runWithOptionalFsTools(
     }
     const extracted = extractToolCalls(planned.text || pass.text)
     if (!extracted.calls.length) {
-      const needsWrite =
-        wantsFileMutation(input.question) && !hasMutatingTool(toolResults) && step < 5
-      if (needsWrite) {
-        reportAgentProgress({
-          phase: 'writing',
-          message: 'Edit still pending — requesting write/patch…'
-        })
-        pass = {
-          text:
-            'You read the file but have NOT written the change yet. ' +
-            'The user asked for a real disk edit. Emit a rowe-tool fence now with patch_file ' +
-            '(preferred for a small comment/snippet) or write_file. Do not only describe the change.',
-          usage: pass.usage
-        }
-        // Fall through by synthesizing a user nudge via another gateway call below.
-        const nudge =
-          formatToolResultsForModel(toolResults.slice(-3)) +
-          '\n\nCRITICAL: The user asked to modify a file. You already have file contents from tool results. ' +
-          'Emit ```rowe-tool with patch_file (path, old, new) to apply the edit now. ' +
-          'Example for a top-of-file comment: old = first few lines, new = comment + those lines. ' +
-          'Do not answer in prose until the patch tool succeeds.'
-        pass = await streamGateway(
-          gateway,
-          { ...input, history: workingHistory, question: nudge, liveContext: undefined },
-          parts.context,
-          parts.hasMaterials,
-          parts.referenceBrief,
-          parts.hasSubject
-        )
-        usage = mergeUsage(usage, pass.usage)
-        continue
-      }
-      if (wantsFileMutation(input.question) && !hasMutatingTool(toolResults)) {
-        const lastRead = [...toolResults].reverse().find((item) => item.name === 'read_file' && item.ok && item.path)
-        reportAgentProgress({ phase: 'writing', message: 'Applying edit directly…' })
-        const forced = await fulfillSimpleFileEdit(input.question, {
+      // Production rule: if the user asked for a mutation and nothing was written yet,
+      // apply a deterministic write immediately — do not burn rounds hoping the model emits tools.
+      if (wantsFileMutation(input.question) && !hasMutatingTool(toolResults) && !hasCompletedDevCommand(input.question, toolResults)) {
+        const lastRead = [...toolResults]
+          .reverse()
+          .find((item) => item.name === 'read_file' && item.ok && item.path)
+
+        // Deterministic helpers first (comment / feature-flag style asks for ANY project).
+        reportAgentProgress({ phase: 'writing', message: 'Applying edit…', ok: false })
+        const forced = await fulfillPendingMutation(input.question, {
           preferHints,
           sender: input.sender,
           lastReadPath: lastRead?.path
         })
-        if (forced) {
+        if (forced?.ok) {
           toolResults.push(forced)
-          reportAgentProgress({ phase: 'writing', message: forced.summary, ok: forced.ok })
-          input.onDelta(`\n\n${forced.ok ? '✓' : '✗'} ${forced.summary}`)
+          reportAgentProgress({ phase: 'writing', message: forced.summary, ok: true })
+          input.onDelta(`\n\n✓ ${forced.summary}`)
           return {
-            text:
-              (extracted.text || planned.text || pass.text || '').trim() +
-              (forced.ok
-                ? `\n\nDone — wrote the change to \`${forced.path || 'file'}\`.`
-                : `\n\nCould not finish the write: ${forced.summary}`),
+            text: stripSafetyMeta(
+              `Done — wrote the change to \`${forced.path || 'file'}\`.`
+            ),
             usage,
             toolResults
           }
         }
+        if (forced && !forced.ok) {
+          reportAgentProgress({ phase: 'writing', message: forced.summary, ok: false })
+        }
+
+        // One forced tool-only pass, then stop with a clear failure (no thrash).
+        if (step < 1) {
+          reportAgentProgress({
+            phase: 'writing',
+            message: 'Requesting write/patch tool…',
+            ok: false
+          })
+          const pathHint =
+            extractPathFromQuestion(input.question) || lastRead?.path || 'the target file'
+          const nudge =
+            formatToolResultsForModel(toolResults.slice(-5)) +
+            `\n\nCRITICAL WRITE PASS: The user asked to modify files. ` +
+            `Reply with ONLY one or more \`\`\`rowe-tool fences — no prose, no <dots_function_call>, no <tool_call>. ` +
+            `Use patch_file (path, old, new) for a small edit or write_file (path, content) for a full file. ` +
+            `Target path hint: ${pathHint}. Prefer the path named in the user request over any other file. ` +
+            `old must be an exact snippet from the latest read_file tool result when available.`
+          pass = await streamGateway(
+            gateway,
+            {
+              ...input,
+              history: workingHistory,
+              question: nudge,
+              liveContext: undefined,
+              enableFsTools: true
+            },
+            parts.context,
+            parts.hasMaterials,
+            parts.referenceBrief,
+            parts.hasSubject
+          )
+          usage = mergeUsage(usage, pass.usage)
+          pass = { ...pass, text: stripSafetyMeta(pass.text) }
+          continue
+        }
+
+        const failPath =
+          extractPathFromQuestion(input.question) || lastRead?.path || 'the requested file'
+        const failReason =
+          (forced && !forced.ok && forced.summary) ||
+          'the model did not emit a usable write_file/patch_file tool call after a retry'
+        const failResult: FsToolResult = forced && !forced.ok
+          ? forced
+          : {
+              name: 'write_file',
+              ok: false,
+              path: typeof failPath === 'string' ? failPath : undefined,
+              summary: failReason
+            }
+        console.error('[rowe:fs] write loop failed', JSON.stringify(failResult, null, 2))
+        reportAgentProgress({
+          phase: 'writing',
+          message: `Could not write ${failPath}: ${failReason}`,
+          ok: false
+        })
+        const errBlock = formatPasteableFsError(failResult)
+        input.onDelta(`\n\n${errBlock}`)
+        return {
+          text: stripSafetyMeta(
+            `I could not write to \`${failPath}\`.\n\n` +
+              errBlock +
+              `\n\nCopy the ERROR block above and paste it here if it happens again.\n\n` +
+              `What to try: Allow the project folder if prompted, confirm the file path, and retry. ` +
+              `If you see an OpenRouter rate-limit error, wait or switch models in Settings.`
+          ),
+          usage,
+          toolResults
+        }
       }
+      // Developer git/shell asks are done once a successful shell/github tool ran.
+      if (hasCompletedDevCommand(input.question, toolResults) && !wantsFileMutation(input.question)) {
+        const shells = toolResults.filter(
+          (item) => item.ok && (item.name === 'run_shell' || item.name.startsWith('github'))
+        )
+        const summary = shells.map((item) => `✓ ${item.summary}`).join('\n')
+        reportAgentProgress({ phase: 'shell', message: 'Developer command finished', ok: true })
+        return {
+          text: stripSafetyMeta(
+            ((extracted.text || planned.text || pass.text || 'Done.').trim() +
+              (summary ? `\n\n${summary}` : '')).trim()
+          ),
+          usage,
+          toolResults
+        }
+      }
+
+      // Never let the model paper over a failed write with vague prose.
+      const failedWrite = lastFailedMutation(toolResults)
+      if (
+        failedWrite &&
+        wantsFileMutation(input.question) &&
+        !hasMutatingTool(toolResults) &&
+        !hasCompletedDevCommand(input.question, toolResults)
+      ) {
+        const errBlock = formatPasteableFsError(failedWrite)
+        console.error('[rowe:fs] finishing with failed write', JSON.stringify(failedWrite, null, 2))
+        input.onDelta(`\n\n${errBlock}`)
+        return {
+          text: stripSafetyMeta(
+            `I could not finish the file change.\n\n` +
+              errBlock +
+              `\n\nCopy the ERROR block above and paste it here if it happens again.`
+          ),
+          usage,
+          toolResults
+        }
+      }
+
       reportAgentProgress({ phase: 'thinking', message: 'Finishing answer…' })
-      return { text: stripSafetyMeta(extracted.text || planned.text || pass.text), usage, toolResults }
+      let finalText = stripSafetyMeta(extracted.text || planned.text || pass.text)
+      if (
+        failedWrite &&
+        /unable to update|did not return a successful result|could not write|file-writing tool/i.test(
+          finalText
+        )
+      ) {
+        const errBlock = formatPasteableFsError(failedWrite)
+        finalText =
+          `I could not finish the file change.
+
+` +
+          errBlock +
+          `
+
+Copy the ERROR block above and paste it here if it happens again.`
+        input.onDelta(`
+
+${errBlock}`)
+      } else if (
+        !failedWrite &&
+        wantsFileMutation(input.question) &&
+        !hasMutatingTool(toolResults) &&
+        /unable to update|did not return a successful result|file-writing tool/i.test(finalText)
+      ) {
+        // Model claimed failure without a tool result — still emit a pasteable block.
+        const synthetic: FsToolResult = {
+          name: 'write_file',
+          ok: false,
+          summary:
+            'Write did not complete: no successful write_file/patch_file result was recorded. Check folder Allow access, path resolution, and the main-process [rowe:fs] log.'
+        }
+        const errBlock = formatPasteableFsError(synthetic)
+        console.error('[rowe:fs] model claimed write failure without tool error', finalText.slice(0, 300))
+        finalText =
+          `I could not finish the file change.
+
+` +
+          errBlock +
+          `
+
+Copy the ERROR block above and paste it here if it happens again.`
+        input.onDelta(`
+
+${errBlock}`)
+      }
+      return { text: finalText, usage, toolResults }
     }
 
     const executed: FsToolResult[] = []
@@ -342,7 +687,34 @@ async function runWithOptionalFsTools(
         message: result.summary,
         ok: result.ok
       })
-      input.onDelta(stripSafetyMeta(`\n\n${result.ok ? '✓' : '✗'} ${result.summary}`))
+      if (result.ok) {
+        input.onDelta(stripSafetyMeta(`\n\n✓ ${result.summary}`))
+      } else {
+        console.error('[rowe:fs] tool failed', JSON.stringify(result, null, 2))
+        input.onDelta(
+          stripSafetyMeta(`\n\n✗ ${result.summary}\n\n${formatPasteableFsError(result)}`)
+        )
+      }
+    }
+
+    const failedMutation = executed.find(
+      (item) =>
+        !item.ok &&
+        (item.name === 'write_file' ||
+          item.name === 'patch_file' ||
+          item.name === 'mkdir' ||
+          item.name === 'delete_path')
+    )
+    if (failedMutation && wantsFileMutation(input.question)) {
+      const errBlock = formatPasteableFsError(failedMutation)
+      return {
+        text:
+          `I could not finish the file change.\n\n` +
+          errBlock +
+          `\n\nCopy the ERROR block above and paste it here if it happens again.`,
+        usage,
+        toolResults
+      }
     }
 
     const toolUser =
@@ -372,10 +744,10 @@ async function runWithOptionalFsTools(
     usage = mergeUsage(usage, pass.usage)
   }
 
-  if (wantsFileMutation(input.question) && !hasMutatingTool(toolResults)) {
+  if (wantsFileMutation(input.question) && !hasMutatingTool(toolResults) && !hasCompletedDevCommand(input.question, toolResults)) {
     const lastRead = [...toolResults].reverse().find((item) => item.name === 'read_file' && item.ok && item.path)
     reportAgentProgress({ phase: 'writing', message: 'Applying edit directly…' })
-    const forced = await fulfillSimpleFileEdit(input.question, {
+    const forced = await fulfillPendingMutation(input.question, {
       preferHints,
       sender: input.sender,
       lastReadPath: lastRead?.path
@@ -485,8 +857,8 @@ async function orderedGateways(): Promise<Gateway[]> {
 
 function gateways(): Gateway[] {
   const openModel =
-    env('OPENROUTER_CHAT_MODEL') || env('RAG_CHAT_MODEL') || 'openrouter/free'
-  const omniModel = env('RAG_CHAT_MODEL') || env('OPENROUTER_CHAT_MODEL') || 'openai/gpt-4o-mini'
+    getSettings().openRouterChatModel || env('OPENROUTER_CHAT_MODEL') || env('RAG_CHAT_MODEL') || 'openrouter/free'
+  const omniModel = getSettings().openRouterChatModel || env('RAG_CHAT_MODEL') || env('OPENROUTER_CHAT_MODEL') || 'openai/gpt-4o-mini'
   const omniUrl = env('RAG_OMNIROUTE_BASE_URL')
   const omniKey = env('RAG_OMNIROUTE_API_KEY')
   const openKey = env('OPENROUTER_API_KEY')
@@ -601,7 +973,8 @@ async function streamGateway(
     'No subject or reference project materials were available for this question.',
     'When local folder or file access is needed, Rowe requests permission for the specific path through the app before this answer is generated; do not instruct the user to run /files or shell commands as the primary path.',
     'Never ask the user to run ls, Get-ChildItem, find, tree, or to paste directory listings for folders on their machine. If a local workspace inventory appears in context, use it. If inventory is missing and local files are needed, say Rowe needs folder access through the app — do not invent shell commands for the user.',
-    'Prefer speed and small concrete steps; use deeper reasoning only when the task needs it.',
+    'Prefer speed and small concrete steps; use deeper reasoning when writing or editing code/docs so the change is correct.',
+    'If you cannot complete a write, say so plainly and name the blocker (missing folder access, wrong path, rate limit, empty model output) — never claim a file was written unless a tool result confirms it.',
     'When selected or reference projects are in context, reuse their patterns and APIs. Otherwise match the user\'s coding style from retrieved snippets and solid best practices.',
     'For multi-step work, break it into a short task list (rowe-tasks) then execute with tools.',
     'Keep answers concise and practical.'
@@ -651,26 +1024,49 @@ async function streamCompletion(
   messages: unknown[],
   onDelta: (chunk: string) => void
 ): Promise<{ text: string; usage?: LlmUsage }> {
-  let response: Response
-  try {
-    response = await fetch(gateway.url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${gateway.key}`,
-        'Content-Type': 'application/json',
-        ...gateway.headers
-      },
-      body: JSON.stringify({
-        model: gateway.model,
-        stream: true,
-        temperature: 0.1,
-        messages,
-        stream_options: { include_usage: true }
+  const payload = {
+    model: gateway.model,
+    stream: true,
+    temperature: 0.1,
+    messages,
+    stream_options: { include_usage: true }
+  }
+  const headers = {
+    Authorization: `Bearer ${gateway.key}`,
+    'Content-Type': 'application/json',
+    ...gateway.headers
+  }
+
+  let response: Response | undefined
+  let lastFetchError: unknown
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      response = await fetch(gateway.url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload)
       })
-    })
-  } catch (error) {
+      lastFetchError = undefined
+      break
+    } catch (error) {
+      lastFetchError = error
+      console.warn(
+        `[rowe:llm] ${gateway.name} fetch failed (attempt ${attempt + 1}/2)`,
+        error instanceof Error ? error.message : error
+      )
+      if (attempt === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 400))
+      }
+    }
+  }
+  if (!response) {
     throw new Error(
-      `${gateway.name} is unavailable: ${error instanceof Error ? error.message : 'connection failed'}`
+      `${gateway.name} is unavailable: ${
+        lastFetchError instanceof Error ? lastFetchError.message : 'connection failed'
+      }. ` +
+        (gateway.name === 'OpenRouter'
+          ? 'Check network / VPN, or start OmniRoute for local fallback.'
+          : 'Check that OmniRoute is running on RAG_OMNIROUTE_BASE_URL.')
     )
   }
   if (!response.ok || !response.body) {
@@ -756,3 +1152,5 @@ function env(name: string): string | undefined {
   const viteEnv = import.meta.env as unknown as Record<string, string | undefined>
   return process.env[name]?.trim() || viteEnv[name]?.trim()
 }
+
+export { wantsFileMutation, isPrimarilyDevCommandAsk } from '../fs-tools'

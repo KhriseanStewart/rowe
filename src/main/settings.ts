@@ -38,6 +38,10 @@ export type AppSettings = {
   plan?: LocalPlan
   /** Active named agent for tray / System AI sessions. */
   activeAgentId?: string
+  /** Preferred OpenRouter / System AI chat model id (overrides env when set). */
+  openRouterChatModel?: string
+  /** Session-style: skip Accept/Decline for FS writes when true (still audited). */
+  trustedMode?: boolean
 }
 
 let cache: AppSettings | undefined
@@ -112,7 +116,12 @@ export function getSettings(): AppSettings {
         : undefined,
     userProfileContext: typeof raw.userProfileContext === 'string' ? raw.userProfileContext : undefined,
     plan: parsePlan(raw.plan),
-    activeAgentId: typeof raw.activeAgentId === 'string' ? raw.activeAgentId : undefined
+    activeAgentId: typeof raw.activeAgentId === 'string' ? raw.activeAgentId : undefined,
+    openRouterChatModel:
+      typeof raw.openRouterChatModel === 'string' && raw.openRouterChatModel.trim()
+        ? raw.openRouterChatModel.trim()
+        : undefined,
+    trustedMode: Boolean(raw.trustedMode)
   }
   return cache
 }
@@ -226,7 +235,9 @@ export function updateSettings(patch: Partial<AppSettings>): AppSettings {
     folderBookmarks: cache.folderBookmarks,
     userProfileContext: cache.userProfileContext,
     plan: cache.plan,
-    activeAgentId: cache.activeAgentId
+    activeAgentId: cache.activeAgentId,
+    openRouterChatModel: cache.openRouterChatModel,
+    trustedMode: cache.trustedMode
   }
 
   if (cache.cursorKey) {
