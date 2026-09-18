@@ -191,6 +191,71 @@ declare global {
       insertJarvisDraft: (mode?: 'paste' | 'reply') => Promise<void>
       copyJarvisDraft: () => Promise<string>
       getSnipGain: () => Promise<SnipGain>
+      getChatModel: () => Promise<string | null>
+      setChatModel: (model: string) => Promise<string | null>
+      getTrustedMode: () => Promise<boolean>
+      setTrustedMode: (enabled: boolean) => Promise<boolean>
+      listAuditLog: (limit?: number) => Promise<
+        Array<{
+          id: string
+          at: number
+          tool: string
+          action: string
+          path?: string
+          status: string
+          detail?: string
+        }>
+      >
+      getPermissionStatus: () => Promise<{
+        screenRecording: 'granted' | 'denied' | 'unknown'
+        accessibility: 'granted' | 'denied' | 'unknown'
+      }>
+      openPermissionSettings: (kind: 'screenRecording' | 'accessibility') => Promise<boolean>
+      invokeTool: (request: {
+        tool: string
+        params?: Record<string, unknown>
+        requestId?: string
+      }) => Promise<{
+        requestId: string
+        status: 'success' | 'error' | 'needs_permission' | 'needs_confirmation'
+        result?: Record<string, unknown>
+        error?: string
+        confirmation?: { title: string; summary: string; danger?: boolean; preview?: Record<string, unknown> }
+      }>
+      getToolStreamPort: () => Promise<number>
+      onOsPreview: (
+        listener: (payload: {
+          tool: string
+          label: string
+          x?: number
+          y?: number
+          durationMs?: number
+        }) => void
+      ) => () => void
+      onToolConfirm: (
+        listener: (payload: {
+          requestId: string
+          status: 'needs_confirmation'
+          confirmation?: {
+            title: string
+            summary: string
+            danger?: boolean
+            preview?: Record<string, unknown>
+          }
+          result?: Record<string, unknown>
+          error?: string
+        }) => void
+      ) => () => void
+      confirmTool: (
+        requestId: string,
+        approved: boolean
+      ) => Promise<{
+        requestId: string
+        status: 'success' | 'error' | 'needs_permission' | 'needs_confirmation'
+        result?: Record<string, unknown>
+        error?: string
+      }>
+      revealInFolder: (filePath: string) => Promise<boolean>
       getAuthStatus: () => Promise<AuthStatus>
       updateProfileContext: (context: string) => Promise<void>
       updatePlan: (plan: {

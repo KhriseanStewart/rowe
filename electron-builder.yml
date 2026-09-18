@@ -16,6 +16,8 @@ extraResources:
     to: snip
   - from: resources/koffi
     to: koffi
+  - from: scripts/rowe_fs_agent.py
+    to: rowe_fs_agent.py
 asarUnpack:
   - resources/**
   - node_modules/uiohook-napi/**

@@ -17,6 +17,7 @@ export type AgentTrailEvent = {
   taskId?: string
   ok?: boolean
   at: number
+  repeats?: number
 }
 
 type TaskChip = {
@@ -37,10 +38,11 @@ const PHASE_LABEL: Record<string, string> = {
   writing: 'Write',
   shell: 'Shell',
   indexing: 'Index',
-  task: 'Task'
+  task: 'Task',
+  tool: 'Tool'
 }
 
-const MAX_LINES = 36
+const MAX_LINES = 24
 
 function shortenPath(message: string): string {
   return message
@@ -51,7 +53,27 @@ function shortenPath(message: string): string {
 }
 
 function looksLikeNoise(message: string): boolean {
-  return /response\s+safety|user\s+safety|^\s*safety\s*:/i.test(message)
+  return /response\s+safety|user\s+safety|^\s*safety\s*:|dots_function_call|function_call/i.test(
+    message
+  )
+}
+
+/** Intermediate write thrash — collapse instead of stacking. */
+function isWriteThrash(message: string): boolean {
+  return /^(applying edit|requesting write\/?patch|edit still pending|applying edit directly)/i.test(
+    message
+  )
+}
+
+function sameTrailKey(a: AgentTrailEvent, b: Pick<AgentTrailEvent, 'phase' | 'message' | 'ok'>): boolean {
+  return a.phase === b.phase && a.message === b.message && a.ok === b.ok
+}
+
+function markFor(line: AgentTrailEvent): string {
+  if (line.ok === false) return '✗'
+  if (line.ok === true) return '✓'
+  if (line.phase === 'reading' && /^(read\b|✓)/i.test(line.message)) return '✓'
+  return '·'
 }
 
 export default function AgentTrail({ active, compact }: Props): React.JSX.Element | null {
@@ -84,10 +106,58 @@ export default function AgentTrail({ active, compact }: Props): React.JSX.Elemen
         message,
         taskId: payload.taskId,
         ok: payload.ok,
-        at: Date.now()
+        at: Date.now(),
+        repeats: 1
       }
 
       setLines((current) => {
+        const last = current[current.length - 1]
+
+        // Collapse identical consecutive lines
+        if (last && sameTrailKey(last, entry)) {
+          const next = [...current]
+          next[next.length - 1] = {
+            ...last,
+            repeats: (last.repeats || 1) + 1,
+            at: entry.at
+          }
+          return next
+        }
+
+        // Collapse write thrash ping-pong (Applying ↔ Requesting) into one live row
+        if (
+          last &&
+          last.phase === 'writing' &&
+          phase === 'writing' &&
+          isWriteThrash(last.message) &&
+          isWriteThrash(message) &&
+          entry.ok !== true
+        ) {
+          const next = [...current]
+          next[next.length - 1] = {
+            ...last,
+            id: entry.id,
+            message: entry.ok === false ? message : last.message,
+            ok: entry.ok === false ? false : last.ok,
+            repeats: (last.repeats || 1) + 1,
+            at: entry.at
+          }
+          return next
+        }
+
+        // A final success/failure after thrash replaces the thrash row
+        if (
+          last &&
+          last.phase === 'writing' &&
+          phase === 'writing' &&
+          isWriteThrash(last.message) &&
+          !isWriteThrash(message)
+        ) {
+          const next = [...current]
+          next[next.length - 1] = { ...entry, repeats: 1 }
+          return next
+        }
+
         const next = [...current, entry]
         return next.length > MAX_LINES ? next.slice(next.length - MAX_LINES) : next
       })
@@ -147,17 +217,23 @@ export default function AgentTrail({ active, compact }: Props): React.JSX.Elemen
       {lines.length ? (
         <ol className="agent-trail-list" ref={listRef}>
           {lines.map((line) => {
-            const mark =
-              line.ok === false ? '✗' : line.ok === true || line.phase === 'reading' || line.phase === 'writing'
-                ? '✓'
-                : '·'
+            const mark = markFor(line)
+            const repeats = line.repeats && line.repeats > 1 ? ` ×${line.repeats}` : ''
             return (
-              <li key={line.id} className={`agent-trail-line is-${line.phase}`}>
+              <li
+                key={line.id}
+                className={`agent-trail-line is-${line.phase}${line.ok === false ? ' is-failed' : ''}${
+                  line.ok === true ? ' is-ok' : ''
+                }`}
+              >
                 <span className="agent-trail-mark" aria-hidden>
                   {mark}
                 </span>
                 <span className="agent-trail-phase">{PHASE_LABEL[line.phase] || line.phase}</span>
-                <span className="agent-trail-msg">{line.message}</span>
+                <span className="agent-trail-msg">
+                  {line.message}
+                  {repeats ? <span className="agent-trail-repeats">{repeats}</span> : null}
+                </span>
               </li>
             )
           })}

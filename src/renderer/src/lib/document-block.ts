@@ -76,6 +76,12 @@ export function sanitizeChatText(text: string): string {
     .replace(/\s*(?:user\s+|model\s+)?safety\s*:\s*\w+/gi, '')
     // Tool call leftovers
     .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '')
+    .replace(/<dots_function_call>[\s\S]*?<\/dots_function_call>/gi, '')
+    .replace(/<dots_function_call>/gi, '')
+    .replace(/`<\/?dots_function_call\b[^>]*>`/gi, '')
+    .replace(/<\/?dots_function_call\b[^>]*>/gi, '')
+    .replace(/&lt;\/?dots_function_call\b[^&]*&gt;/gi, '')
+    .replace(/(?:^|\n)\s*dots_function_call\s*(?=\n|$)/gi, '')
     .replace(/<\/?tool_call>|<\/?arg_key>|<\/?arg_value>|<\/?parameter>|<\/?parameters>/gi, '')
     .replace(
       /\[?(?:list_dir|read_file|write_file|mkdir|delete_path|path_exists|run_shell|patch_file)\s*\([^\)]*\)\]?/gi,
