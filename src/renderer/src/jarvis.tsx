@@ -2,21 +2,31 @@ import { FormEvent, useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './assets/main.css'
 import ChatMarkdown from './components/ChatMarkdown'
+import RoweMark from './components/RoweMark'
+import VoiceOrb from './components/VoiceOrb'
 
 type JarvisState = {
-  status: 'pulse' | 'compose' | 'searching' | 'answer' | 'error'
+  status: 'pulse' | 'pick' | 'compose' | 'searching' | 'answer' | 'error'
   text: string
   appName: string
-  source?: 'mail' | 'outlook' | 'ax' | 'selection' | 'pin' | 'empty'
+  source?: 'mail' | 'outlook' | 'ax' | 'selection' | 'clipboard' | 'pin' | 'app' | 'empty'
   canPin?: boolean
+  canInsert?: boolean
+  canReply?: boolean
+  cursorReady?: boolean
+  ragReady?: boolean
+  engine?: 'cursor' | 'system'
+  pickError?: string
 }
 
 const SOURCE_LABEL: Record<NonNullable<JarvisState['source']>, string> = {
   mail: 'Read from Mail',
   outlook: 'Read from Outlook',
   ax: 'Read from this window',
-  selection: 'Selected text',
+  selection: 'Highlighted',
+  clipboard: 'Clipboard',
   pin: 'Pinned thread',
+  app: 'From this app',
   empty: 'No text found'
 }
 
@@ -42,6 +52,9 @@ function Jarvis(): React.JSX.Element {
         setIncludeScreen(false)
         setPin(next.source === 'pin')
       }
+      if (next.status === 'searching') {
+        setNote('')
+      }
     })
   }, [])
 
@@ -53,20 +66,45 @@ function Jarvis(): React.JSX.Element {
 
   const onSubmit = (event: FormEvent): void => {
     event.preventDefault()
-    void window.api.submitJarvisNote(note, { includeScreen, pin })
+    const extra = note.trim()
+    if (state.status === 'answer' && !extra) {
+      return
+    }
+    void window.api.submitJarvisNote(extra, { includeScreen, pin })
   }
+
+  const noteField = (placeholder: string): React.JSX.Element => (
+    <div className="flex min-h-10 items-center gap-2 rounded-lg border border-agent-stroke bg-agent-fill py-1 pr-1 pl-3">
+      <input
+        ref={inputRef}
+        className="min-w-0 flex-1 border-0 bg-transparent text-[14px] tracking-tight text-agent-text outline-none placeholder:text-agent-text-soft"
+        value={note}
+        onChange={(event) => setNote(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') {
+            event.preventDefault()
+            void window.api.hideJarvis()
+          }
+        }}
+        placeholder={placeholder}
+        aria-label="Add a note"
+      />
+      <button
+        type="submit"
+        aria-label="Ask Rowe"
+        className="grid size-8 place-items-center rounded-md bg-agent-accent text-white"
+      >
+        <svg className="size-3.5 rotate-180" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M8 2.6a.7.7 0 0 1 .7.7v8.2l2.45-2.45a.7.7 0 1 1 1 1L8.5 14.2a.7.7 0 0 1-1 0L3.85 10.05a.7.7 0 0 1 1-1L7.3 11.5V3.3a.7.7 0 0 1 .7-.7Z" />
+        </svg>
+      </button>
+    </div>
+  )
 
   return (
     <div className="panel-fill flex h-full flex-col overflow-hidden rounded-2xl border border-agent-stroke p-3">
       <header className="flex items-center gap-2 px-0.5 pb-2 [-webkit-app-region:drag]">
-        <span
-          className="grid size-5.5 place-items-center rounded-md bg-agent-fill text-agent-accent"
-          aria-hidden="true"
-        >
-          <svg className="size-2.75" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M8 1.2c.2 0 .35.13.4.33l.7 2.48a3.2 3.2 0 0 0 2.29 2.29l2.48.7a.42.42 0 0 1 0 .8l-2.48.7a3.2 3.2 0 0 0 2.29 2.29l-.7 2.48a.42.42 0 0 1-.8 0l-.7-2.48a3.2 3.2 0 0 0-2.29-2.29l-2.48-.7a.42.42 0 0 1 0-.8l2.48-.7a3.2 3.2 0 0 0 2.29-2.29l.7-2.48A.42.42 0 0 1 8 1.2Z" />
-          </svg>
-        </span>
+        <RoweMark className="size-5.5" />
         <span className="text-[13px] font-semibold tracking-tight">Rowe</span>
         <div className="min-w-3 flex-1" />
         <button
@@ -86,14 +124,62 @@ function Jarvis(): React.JSX.Element {
 
       <div className="min-h-0 flex-1 overflow-auto [-webkit-app-region:no-drag]">
         {state.status === 'pulse' ? (
-          <p className="px-0.5 text-[13px] text-agent-text-soft">
-            Press {window.api.platform === 'darwin' ? 'Control-Command-T' : 'Ctrl+Alt+T'} to ask
-          </p>
+          <div className="flex flex-col gap-2">
+            <VoiceOrb className="h-36 w-36" label="Companion ready" />
+            <p className="px-0.5 text-[12px] text-agent-text-soft">
+              {state.text ? `${state.text} · ` : ''}
+              Press {window.api.platform === 'darwin' ? 'Control-Command-T' : 'Ctrl+Alt+T'} to ask
+            </p>
+          </div>
+        ) : null}
+
+        {state.status === 'pick' ? (
+          <div className="flex flex-col gap-2 [-webkit-app-region:no-drag]">
+            <p className="px-0.5 text-[13px] font-semibold text-agent-text">Which AI should Companion use?</p>
+            <p className="px-0.5 text-[12px] leading-4 text-agent-text-soft">
+              Cursor can edit and see your workspace. System AI searches your selected reference projects (same RAG as chat), then answers with the screen context.
+            </p>
+            {state.pickError ? (
+              <p className="px-0.5 text-[12px] font-semibold text-agent-danger">{state.pickError}</p>
+            ) : null}
+            <button
+              type="button"
+              className={`rounded-xl border px-3 py-2.5 text-left ${
+                state.engine === 'cursor'
+                  ? 'border-agent-accent bg-agent-fill'
+                  : 'border-agent-stroke bg-agent-bg hover:bg-agent-fill'
+              }`}
+              onClick={() => {
+                void window.api.selectCompanionAi('cursor')
+              }}
+            >
+              <p className="text-[13px] font-semibold">Cursor</p>
+              <p className="mt-0.5 text-[11px] text-agent-text-soft">
+                {state.cursorReady ? 'Composer on your Cursor key' : 'Connect Cursor in Rowe first'}
+              </p>
+            </button>
+            <button
+              type="button"
+              className={`rounded-xl border px-3 py-2.5 text-left ${
+                state.engine === 'system'
+                  ? 'border-agent-accent bg-agent-fill'
+                  : 'border-agent-stroke bg-agent-bg hover:bg-agent-fill'
+              }`}
+              onClick={() => {
+                void window.api.selectCompanionAi('system')
+              }}
+            >
+              <p className="text-[13px] font-semibold">System AI</p>
+              <p className="mt-0.5 text-[11px] text-agent-text-soft">
+                {state.ragReady ? 'RAG over selected reference projects' : 'Select projects and add a System AI key'}
+              </p>
+            </button>
+          </div>
         ) : null}
 
         {state.status === 'compose' ? (
           <form className="flex flex-col gap-2" onSubmit={onSubmit}>
-            <p className="truncate px-0.5 text-[12px] text-agent-text-soft">
+            <p className="line-clamp-2 select-text px-0.5 text-[12px] text-agent-text-soft">
               {state.source ? SOURCE_LABEL[state.source] : 'Ready'}
               {state.text ? ` · ${state.text}` : ''}
             </p>
@@ -121,46 +207,63 @@ function Jarvis(): React.JSX.Element {
                 Pin thread
               </label>
             </div>
-            <div className="flex min-h-10 items-center gap-2 rounded-lg border border-agent-stroke bg-agent-fill py-1 pr-1 pl-3">
-              <input
-                ref={inputRef}
-                className="min-w-0 flex-1 border-0 bg-transparent text-[14px] tracking-tight text-agent-text outline-none placeholder:text-agent-text-soft"
-                value={note}
-                onChange={(event) => setNote(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Escape') {
-                    event.preventDefault()
-                    void window.api.hideJarvis()
-                  }
-                }}
-                placeholder="Add a note"
-                aria-label="Add a note"
-              />
-              <button
-                type="submit"
-                aria-label="Ask Rowe"
-                className="grid size-8 place-items-center rounded-md bg-agent-accent text-white"
-              >
-                <svg className="size-3.5 rotate-180" viewBox="0 0 16 16" fill="currentColor">
-                  <path d="M8 2.6a.7.7 0 0 1 .7.7v8.2l2.45-2.45a.7.7 0 1 1 1 1L8.5 14.2a.7.7 0 0 1-1 0L3.85 10.05a.7.7 0 0 1 1-1L7.3 11.5V3.3a.7.7 0 0 1 .7-.7Z" />
-                </svg>
-              </button>
-            </div>
+            {noteField('Ask a question, or say reply')}
           </form>
         ) : null}
 
         {state.status === 'searching' ? (
-          <p className="px-0.5 text-[13px] text-agent-text-soft">Searching…</p>
+          <div className="flex flex-col gap-2">
+            <VoiceOrb className="h-36 w-36" label="Searching" />
+            <p className="px-0.5 text-[13px] text-agent-text-soft">Searching…</p>
+          </div>
         ) : null}
 
         {state.status === 'answer' && state.text ? (
-          <div className="text-[13px] leading-snug">
-            <ChatMarkdown text={state.text} tone="assistant" />
+          <div className="flex h-full flex-col gap-2">
+            <div className="min-h-0 flex-1 overflow-auto text-[13px] leading-snug">
+              <ChatMarkdown text={state.text} tone="assistant" />
+            </div>
+            {state.canInsert ? (
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  className="flex-1 rounded-md border border-agent-stroke bg-agent-fill px-2 py-1.5 text-[12px] text-agent-text"
+                  onClick={() => {
+                    void window.api.copyJarvisDraft()
+                  }}
+                >
+                  Copy
+                </button>
+                <button
+                  type="button"
+                  className="flex-1 rounded-md border border-agent-stroke bg-agent-fill px-2 py-1.5 text-[12px] text-agent-text"
+                  onClick={() => {
+                    void window.api.insertJarvisDraft('paste')
+                  }}
+                >
+                  Paste
+                </button>
+                {state.canReply ? (
+                  <button
+                    type="button"
+                    className="flex-1 rounded-md bg-agent-accent px-2 py-1.5 text-[12px] text-white"
+                    onClick={() => {
+                      void window.api.insertJarvisDraft('reply')
+                    }}
+                  >
+                    Reply
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+            <form className="shrink-0" onSubmit={onSubmit}>
+              {noteField('Add details, or type a reply')}
+            </form>
           </div>
         ) : null}
 
         {state.status === 'error' ? (
-          <p className="px-0.5 text-[13px] text-agent-text-soft">{state.text}</p>
+          <p className="select-text px-0.5 text-[13px] text-agent-text-soft">{state.text}</p>
         ) : null}
       </div>
     </div>

@@ -1,6 +1,6 @@
 import { app } from 'electron'
 import { execFileSync } from 'child_process'
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { delimiter, dirname, join } from 'path'
 
@@ -9,7 +9,7 @@ export type SnipRuntime = {
   workspace: string
 }
 
-const FILTER_FILES = ['bun.yaml']
+const FILTER_FILES = ['bun.yaml', 'rowe-rag.yaml']
 
 export function prepareSnipRuntime(): SnipRuntime | undefined {
   const snipBin = resolveSnipBin()
@@ -23,6 +23,7 @@ export function prepareSnipRuntime(): SnipRuntime | undefined {
   if (!path.split(delimiter).includes(binDir)) {
     process.env.PATH = `${binDir}${delimiter}${path}`
   }
+  installRagContextHelper(binDir)
 
   const workspace = join(app.getPath('userData'), 'snip', 'workspace')
   materializeWorkspace(workspace, snipBin)
@@ -195,6 +196,63 @@ function projectFilterPath(name: string): string | undefined {
     join(__dirname, '../../.snip/filters', name)
   ]
   return candidates.find((path) => existsSync(path))
+}
+
+function installRagContextHelper(binDir: string): void {
+  mkdirSync(binDir, { recursive: true })
+  if (process.platform === 'win32') {
+    const dest = join(binDir, 'rowe-rag-context.cmd')
+    writeFileSync(dest, '@echo off\r\ntype "%~1"\r\n')
+    return
+  }
+  const dest = join(binDir, 'rowe-rag-context')
+  writeFileSync(
+    dest,
+    `#!/bin/sh\nif [ -n "$1" ]; then\n  exec cat "$1"\nfi\nexec cat\n`
+  )
+  chmodSync(dest, 0o755)
+}
+
+/**
+ * Compress prompt/context text through the bundled snip filter pipeline.
+ * Used for OpenRouter only — OmniRoute has its own compressor.
+ */
+export function compressWithSnip(text: string): string {
+  const input = text.trim()
+  if (!input) {
+    return text
+  }
+  const runtime = prepareSnipRuntime()
+  if (!runtime) {
+    return text
+  }
+
+  const tmpDir = join(app.getPath('temp'), 'rowe-snip')
+  mkdirSync(tmpDir, { recursive: true })
+  const tmp = join(tmpDir, `rag-${process.pid}-${Date.now()}.txt`)
+  try {
+    writeFileSync(tmp, input)
+    const output = execFileSync(runtime.snipBin, ['run', '--', 'rowe-rag-context', tmp], {
+      encoding: 'utf8',
+      timeout: 8000,
+      maxBuffer: 2_000_000,
+      env: {
+        ...process.env,
+        SNIP_BIN: runtime.snipBin,
+        PATH: `${dirname(runtime.snipBin)}${delimiter}${process.env.PATH ?? ''}`
+      }
+    })
+    const trimmed = output.replace(/\s+$/g, '')
+    return trimmed || text
+  } catch {
+    return text
+  } finally {
+    try {
+      unlinkSync(tmp)
+    } catch {
+      // ignore cleanup failures
+    }
+  }
 }
 
 function bundledHookPath(): string | undefined {

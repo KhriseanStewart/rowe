@@ -5,7 +5,7 @@ import tailwindcss from '@tailwindcss/vite'
 
 export default defineConfig({
   main: {
-    envPrefix: ['MAIN_VITE_', 'CURSOR_']
+    envPrefix: ['MAIN_VITE_', 'CURSOR_', 'GITHUB_', 'RAG_', 'OPENROUTER_']
   },
   preload: {},
   renderer: {

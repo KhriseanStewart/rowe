@@ -60,11 +60,15 @@ export function getThread(id: string): HistoryThread | undefined {
   return readHistory().threads.find((thread) => thread.id === id)
 }
 
-export function createThread(title = 'New chat'): HistoryThread {
+export function createThread(
+  title = 'New chat',
+  options?: { agentId?: string }
+): HistoryThread {
   const now = Date.now()
   const thread: HistoryThread = {
     id: randomUUID(),
     title,
+    agentId: options?.agentId,
     createdAt: now,
     updatedAt: now,
     messages: []
@@ -73,6 +77,10 @@ export function createThread(title = 'New chat'): HistoryThread {
   data.threads.unshift(thread)
   writeHistory(data)
   return thread
+}
+
+export function findThreadByAgentId(agentId: string): HistoryThread | undefined {
+  return readHistory().threads.find((thread) => thread.agentId === agentId)
 }
 
 export function deleteThread(id: string): void {

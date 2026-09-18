@@ -6,7 +6,11 @@ out
 *.log*
 .env
 .env.*
+!.env.example
 .snip/tee/
 resources/snip/darwin-*
 resources/snip/linux-*
 resources/snip/win32-*
+resources/koffi/**
+!resources/koffi/.gitkeep
+data/

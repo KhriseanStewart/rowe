@@ -80,16 +80,20 @@ export async function sendCursorPrompt(
     }
 
     const current = await getOrCreateAgent(threadId)
+    const profileContext = getSettings().userProfileContext
+    const contextualPrompt = profileContext
+      ? `${prompt}\n\n[User working context — minor personalization hint only]\n${profileContext}`
+      : prompt
     const run = await current.send(
       images?.length
         ? {
-            text: prompt,
+            text: contextualPrompt,
             images: images.map((image) => ({
               data: image.data.replace(/^data:[^;]+;base64,/, ''),
               mimeType: image.mimeType
             }))
           }
-        : prompt
+        : contextualPrompt
     )
     let output = ''
 
@@ -104,12 +108,13 @@ export async function sendCursorPrompt(
           .map((block) => block.text)
           .join('')
 
-        const delta = chunk.startsWith(output) ? chunk.slice(output.length) : chunk
+        const next = mergeStreamText(output, chunk)
+        const delta = next.startsWith(output) ? next.slice(output.length) : next
         if (!delta) {
           continue
         }
 
-        output = chunk.startsWith(output) ? chunk : output + chunk
+        output = next
         if (threadId && assistantId) {
           updateMessage(threadId, assistantId, output)
         }
@@ -223,6 +228,43 @@ function resolveCursorApiKey(apiKey?: string): string {
   }
 
   return key
+}
+
+function mergeStreamText(previous: string, incoming: string): string {
+  if (!incoming) {
+    return previous
+  }
+  if (!previous) {
+    return incoming
+  }
+  if (incoming.startsWith(previous)) {
+    return incoming
+  }
+  if (previous.startsWith(incoming)) {
+    return previous
+  }
+  if (incoming.length >= previous.length + 8) {
+    return incoming
+  }
+
+  const overlap = sharedOverlap(previous, incoming)
+  if (overlap >= 4) {
+    return previous + incoming.slice(overlap)
+  }
+
+  const needsSpace =
+    !/\s$/.test(previous) && !/^\s/.test(incoming) && !/^[.,!?;:)}\]]/.test(incoming)
+  return previous + (needsSpace ? ' ' : '') + incoming
+}
+
+function sharedOverlap(left: string, right: string): number {
+  const max = Math.min(left.length, right.length)
+  for (let size = max; size > 0; size -= 1) {
+    if (left.slice(-size) === right.slice(0, size)) {
+      return size
+    }
+  }
+  return 0
 }
 
 function toError(error: unknown, fallback: string): Error {

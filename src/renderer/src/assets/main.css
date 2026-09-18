@@ -9,4 +9,7 @@
   --color-agent-stroke: var(--agent-stroke);
   --color-agent-accent: var(--agent-accent);
   --color-agent-bubble: var(--agent-bubble);
+  --color-agent-bg: var(--agent-bg);
+  --color-agent-surface: var(--agent-surface);
+  --color-agent-danger: var(--agent-danger);
 }

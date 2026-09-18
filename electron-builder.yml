@@ -14,29 +14,37 @@ files:
 extraResources:
   - from: resources/snip
     to: snip
+  - from: resources/koffi
+    to: koffi
 asarUnpack:
   - resources/**
   - node_modules/uiohook-napi/**
   - node_modules/koffi/**
+  - node_modules/@koromix/**
 win:
   executableName: rowe
+  icon: build/icon.ico
 nsis:
   artifactName: ${name}-${version}-setup.${ext}
   shortcutName: ${productName}
   uninstallDisplayName: ${productName}
   createDesktopShortcut: always
 mac:
+  icon: build/icon.icns
   entitlementsInherit: build/entitlements.mac.plist
   extendInfo:
     - NSCameraUsageDescription: Application requests access to the device's camera.
     - NSMicrophoneUsageDescription: Application requests access to the device's microphone.
-    - NSDocumentsFolderUsageDescription: Application requests access to the user's Documents folder.
-    - NSDownloadsFolderUsageDescription: Application requests access to the user's Downloads folder.
+    - NSDocumentsFolderUsageDescription: Rowe needs Documents access so System AI can use folders you choose as coding and package references.
+    - NSDownloadsFolderUsageDescription: Rowe needs Downloads access when you save or open files from the menu-bar chatbot.
+    - NSDesktopFolderUsageDescription: Rowe needs Desktop access when you grant a Desktop folder to the menu-bar chatbot.
+    - NSRemovableVolumesUsageDescription: Rowe needs access to volumes you select so System AI can read project files you allow.
     - NSScreenCaptureUsageDescription: Rowe captures your screen when Companion is on so it can answer questions about what you click.
   notarize: false
 dmg:
   artifactName: ${name}-${version}.${ext}
 linux:
+  icon: build/icon.png
   target:
     - AppImage
     - snap

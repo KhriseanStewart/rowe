@@ -2,18 +2,30 @@ import { BrowserWindow, desktopCapturer, globalShortcut, screen, systemPreferenc
 import { join } from 'path'
 import { is } from '@electron-toolkit/utils'
 import { hideTrayWindow } from './tray-window'
-import { sendCursorPrompt } from './cursor'
+import { sendCursorPrompt, getCursorApiKey } from './cursor'
 import { getCursorAppearance } from './cursor-kind'
-import { askShortcut, copySelection, getFrontmostApp, glassWindowOptions } from './platform'
-import { looksLikeMessage, readScreenContext, type ScreenContext } from './ax-context'
+import { answerWithRag, ragIsConfigured, trimChatHistory, type ChatTurn } from './rag/system-ai'
+import { selectedReadyProjects } from './rag/projects'
+import { resolveProjectsForQuestion } from './rag/workspace'
+import { getSettings, updateSettings, planAllowsAskLocal, recordLocalPlanUsage, type CompanionAi } from './settings'
+import { askShortcut, getFrontmostApp, glassWindowOptions, readQuotedText } from './platform'
+import {
+  contextIsThin,
+  isBrowserApp,
+  readAxHighlight,
+  readScreenContext,
+  type ScreenContext
+} from './ax-context'
 import { loadPinnedContext, savePinnedContext } from './pinned-context'
+import { copyDraft, insertDraft } from './insert-reply'
 
 const ASK_SHORTCUT = askShortcut()
 const JARVIS_SIZES = {
-  pulse: { width: 248, height: 76 },
-  compose: { width: 320, height: 188 },
-  searching: { width: 268, height: 92 },
-  answer: { width: 312, height: 248 }
+  pulse: { width: 280, height: 196 },
+  pick: { width: 320, height: 268 },
+  compose: { width: 320, height: 204 },
+  searching: { width: 280, height: 196 },
+  answer: { width: 336, height: 348 }
 }
 
 export type JarvisAskOptions = {
@@ -27,6 +39,12 @@ type JarvisPayload = {
   appName: string
   source?: ScreenContext['source']
   canPin?: boolean
+  canInsert?: boolean
+  canReply?: boolean
+  cursorReady?: boolean
+  ragReady?: boolean
+  engine?: CompanionAi
+  pickError?: string
 }
 
 type PendingAsk = {
@@ -52,10 +70,24 @@ const CURSOR_OFFSET: Record<string, { x: number; y: number }> = {
 let cursorWindow: BrowserWindow | undefined
 let jarvisWindow: BrowserWindow | undefined
 let active = false
+let picking = false
+let companionEngine: CompanionAi | undefined
+let companionHistory: ChatTurn[] = []
 let asking = false
 let composing = false
 let pendingAsk: PendingAsk | undefined
 let pointerTimer: ReturnType<typeof setInterval> | undefined
+let lastQuote = ''
+let lastAsk: PendingAsk | undefined
+let lastInsert:
+  | {
+      text: string
+      appName: string
+      source?: ScreenContext['source']
+      url?: string
+      windowTitle?: string
+    }
+  | undefined
 
 export function isCompanionActive(): boolean {
   return active
@@ -67,6 +99,9 @@ export function startCompanion(): void {
   }
 
   active = true
+  picking = true
+  companionEngine = undefined
+  companionHistory = []
   if (process.platform === 'darwin') {
     systemPreferences.isTrustedAccessibilityClient(true)
   }
@@ -75,6 +110,45 @@ export function startCompanion(): void {
   createCursorWindow()
   createJarvisWindow()
   startPointerLoop()
+  emitStatus()
+
+  const pick = (): void => {
+    if (active && picking) {
+      showCompanionPick()
+    }
+  }
+
+  if (jarvisWindow?.webContents.isLoading()) {
+    jarvisWindow.webContents.once('did-finish-load', pick)
+  } else {
+    pick()
+  }
+}
+
+export async function selectCompanionAi(engine: CompanionAi): Promise<void> {
+  if (!active || !picking) {
+    return
+  }
+
+  if (engine === 'cursor' && !getCursorApiKey()) {
+    showCompanionPick('Connect Cursor in Rowe first.')
+    return
+  }
+  if (engine === 'system') {
+    if (!ragIsConfigured()) {
+      showCompanionPick('Add an OpenRouter or OmniRoute key in .env, then restart Rowe.')
+      return
+    }
+    const projects = await selectedReadyProjects()
+    if (!projects.length) {
+      showCompanionPick('Select indexed reference projects in Rowe first.')
+      return
+    }
+  }
+
+  companionEngine = engine
+  picking = false
+  updateSettings({ companionAi: engine })
 
   if (
     !globalShortcut.register(ASK_SHORTCUT, () => {
@@ -84,19 +158,23 @@ export function startCompanion(): void {
     console.error(`Could not register ${ASK_SHORTCUT}`)
   }
 
-  emitStatus()
+  showJarvisPulse()
+}
 
-  const pulse = (): void => {
-    if (active && !asking) {
-      showJarvisPulse()
-    }
-  }
-
-  if (jarvisWindow?.webContents.isLoading()) {
-    jarvisWindow.webContents.once('did-finish-load', pulse)
-  } else {
-    pulse()
-  }
+function showCompanionPick(pickError?: string): void {
+  const point = screen.getCursorScreenPoint()
+  showJarvis('pick', point, true)
+  void selectedReadyProjects().then((projects) => {
+    sendJarvis({
+      status: 'pick',
+      text: '',
+      appName: '',
+      cursorReady: Boolean(getCursorApiKey()),
+      ragReady: ragIsConfigured() && projects.length > 0,
+      engine: getSettings().companionAi,
+      pickError
+    })
+  })
 }
 
 export function stopCompanion(): void {
@@ -105,6 +183,9 @@ export function stopCompanion(): void {
   }
 
   active = false
+  picking = false
+  companionEngine = undefined
+  companionHistory = []
   asking = false
   composing = false
   pendingAsk = undefined
@@ -116,6 +197,10 @@ export function stopCompanion(): void {
 }
 
 export function hideJarvis(): void {
+  if (picking) {
+    stopCompanion()
+    return
+  }
   if (!asking) {
     composing = false
     pendingAsk = undefined
@@ -135,8 +220,19 @@ export function pinJarvisContext(): void {
   sendJarvis(composePayload(pendingAsk.appName, pendingAsk.context, true))
 }
 
+export function insertJarvisDraft(mode: 'paste' | 'reply' = 'paste'): void {
+  void finishInsert(mode)
+}
+
+export function copyJarvisDraft(): string {
+  if (!lastInsert?.text.trim()) {
+    return ''
+  }
+  return copyDraft(lastInsert.text)
+}
+
 async function askCompanion(): Promise<void> {
-  if (!active || asking) {
+  if (!active || asking || picking || !companionEngine) {
     return
   }
 
@@ -152,11 +248,21 @@ async function askCompanion(): Promise<void> {
   await delay(40)
 
   try {
-    const selection = await copySelection()
-    const live = await readScreenContext({ point, appName, selection })
+    const highlight = readAxHighlight(point)
+    const quoted = await readQuotedText()
+    const live = await readScreenContext({
+      point,
+      appName,
+      selection: quoted.selection,
+      clipboard: quoted.clipboard,
+      highlight,
+      staleClipboard: lastQuote
+    })
     const pinned = loadPinnedContext()
-    const context = pickContext(live, pinned)
+    const context = pickContext(live, pinned, appName)
+    lastQuote = context.text.trim()
     pendingAsk = { point, appName, context }
+    lastAsk = pendingAsk
     composing = true
     showJarvis('compose', point, true)
     sendJarvis(composePayload(appName, context, Boolean(pinned)))
@@ -174,14 +280,15 @@ async function askCompanion(): Promise<void> {
 }
 
 async function finishAsk(note?: string, options?: JarvisAskOptions): Promise<void> {
-  const pending = pendingAsk
-  if (!active || asking || !pending) {
+  const pending = pendingAsk ?? lastAsk
+  if (!active || asking || !pending || !companionEngine) {
     return
   }
 
   composing = false
   asking = true
-  pendingAsk = undefined
+  pendingAsk = pending
+  lastAsk = pending
 
   const { point, appName, context } = pending
   if (options?.pin && context.text.trim()) {
@@ -192,98 +299,295 @@ async function finishAsk(note?: string, options?: JarvisAskOptions): Promise<voi
   sendJarvis({ status: 'searching', text: '', appName })
 
   try {
-    const image = options?.includeScreen ? await captureDisplayAt(point) : undefined
-    const prompt = buildPrompt(appName, context, note, Boolean(image))
+    const intent = askIntent(note)
+    const thin = contextIsThin(context)
+    const image = options?.includeScreen || thin ? await captureDisplayAt(point) : undefined
+    const prompt = buildPrompt(appName, context, note, Boolean(image), thin && Boolean(image), intent)
     let output = ''
-
-    await sendCursorPrompt(
-      prompt,
-      (chunk) => {
-        output += chunk
-        showJarvis('answer', point)
-        sendJarvis({ status: 'answer', text: output, appName })
-      },
-      image ? [{ data: image, mimeType: 'image/jpeg' }] : undefined
-    )
-
-    if (!output) {
-      sendJarvis({ status: 'answer', text: 'No response.', appName })
+    const onDelta = (chunk: string): void => {
+      output += chunk
+      showJarvis('answer', point)
+      sendJarvis(answerPayload(output, appName, context.source, intent))
     }
+    const imagePayload = image ? { data: image, mimeType: 'image/jpeg' } : undefined
+    let final = ''
+    if (companionEngine === 'system') {
+      const allowed = planAllowsAskLocal()
+      if (!allowed.ok) {
+        throw new Error(allowed.message)
+      }
+      const projects = await selectedReadyProjects()
+      if (!ragIsConfigured()) {
+        throw new Error('Configure OmniRoute or OpenRouter credentials for System AI.')
+      }
+      const question = ragQuestion(note, context, appName)
+      const resolved = await resolveProjectsForQuestion(
+        question,
+        projects.map((project) => project.id),
+        companionHistory
+      )
+      const result = await answerWithRag({
+        question,
+        projectIds: resolved.projectIds,
+        subjectIds: resolved.subjectIds,
+        referenceIds: resolved.referenceIds,
+        liveContext: prompt,
+        image: imagePayload,
+        history: companionHistory,
+        resolutionNote: resolved.note,
+        onDelta
+      })
+      final = result.text
+      if (result.usage) {
+        recordLocalPlanUsage({
+          openRouterSpendUsd: result.usage.costUsd,
+          promptTokens: result.usage.promptTokens,
+          completionTokens: result.usage.completionTokens,
+          askCount: 1,
+          source: 'companion-system'
+        })
+      } else {
+        recordLocalPlanUsage({ askCount: 1, source: 'companion-system' })
+      }
+    } else {
+      const allowed = planAllowsAskLocal()
+      if (!allowed.ok) {
+        throw new Error(allowed.message)
+      }
+      final = await sendCursorPrompt(prompt, onDelta, imagePayload ? [imagePayload] : undefined)
+      recordLocalPlanUsage({ askCount: 1, source: 'companion-cursor' })
+    }
+
+    const text = final.trim() || output.trim() || 'No response.'
+    if (companionEngine === 'system') {
+      companionHistory = trimChatHistory([
+        ...companionHistory,
+        { role: 'user', content: note?.trim() || ragQuestion(note, context, appName) },
+        { role: 'assistant', content: text }
+      ])
+    }
+    lastInsert = {
+      text,
+      appName,
+      source: context.source,
+      url: context.url,
+      windowTitle: context.windowTitle
+    }
+    sendJarvis(answerPayload(text, appName, context.source, intent))
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Signal lost.'
     showJarvis('answer', point)
     sendJarvis({ status: 'error', text: message, appName })
   } finally {
     asking = false
+    pendingAsk = pending
   }
+}
+
+function ragQuestion(note: string | undefined, context: ScreenContext, appName: string): string {
+  return [
+    note?.trim(),
+    context.subject,
+    context.windowTitle,
+    context.document,
+    context.appName || appName,
+    context.text.trim().slice(0, 800)
+  ]
+    .filter(Boolean)
+    .join('\n')
 }
 
 function buildPrompt(
   appName: string,
   context: ScreenContext,
   note?: string,
-  hasImage = false
+  hasImage = false,
+  usedScreenFallback = false,
+  intent: 'ask' | 'draft' = 'ask'
 ): string {
   const extra = note?.trim()
+  const quoted = context.text.trim().slice(0, 8000)
+  const draft = intent === 'draft'
+  const source =
+    context.source === 'selection'
+      ? 'highlighted text'
+      : context.source === 'clipboard'
+        ? 'clipboard'
+        : context.source === 'pin'
+          ? 'pinned text'
+          : context.source === 'app'
+            ? 'the focused app'
+            : `text from ${appName || 'the current app'}`
+
   const parts = [
-    context.source === 'pin'
-      ? 'Reply using the pinned thread below. The user may no longer be looking at it.'
-      : `In ${appName || 'the current app'}.`
+    extra
+      ? `The user asked:\n${extra}`
+      : draft
+        ? 'Draft a reply using the focused app context.'
+        : 'Answer using the focused app context below.'
   ]
 
-  if (context.from) {
-    parts.push(`From: ${context.from}`)
-  }
-  if (context.subject) {
-    parts.push(`Subject: ${context.subject}`)
-  }
-  if (context.title && !context.subject) {
-    parts.push(`Title: ${context.title}`)
-  }
-  if (context.text.trim()) {
-    parts.push(`Thread:\n${context.text.trim().slice(0, 8000)}`)
-  } else if (!hasImage) {
-    parts.push(
-      'No on-screen text could be read. Ask for the missing details instead of requesting a screenshot.'
-    )
+  const appLines = [
+    `App: ${context.appName || appName || 'unknown'}`,
+    context.windowTitle ? `Window: ${context.windowTitle}` : '',
+    context.url ? `URL: ${context.url}` : '',
+    context.document ? `Document: ${context.document}` : '',
+    context.files?.length ? `Files:\n${context.files.join('\n')}` : '',
+    context.from ? `From: ${context.from}` : '',
+    context.subject ? `Subject: ${context.subject}` : ''
+  ].filter(Boolean)
+  if (appLines.length) {
+    parts.push(`Focused Mac app when they pressed the shortcut:\n${appLines.join('\n')}`)
   }
 
-  if (extra) {
-    parts.push(extra)
+  if (quoted) {
+    parts.push(`Primary ${source}:\n"""\n${quoted}\n"""`)
+  }
+
+  if (context.extras && context.extras.trim() !== quoted) {
+    parts.push(`More text from that app window:\n"""\n${context.extras.trim()}\n"""`)
+  }
+
+  if (!quoted && !context.extras && !hasImage && !appLines.length) {
+    parts.push('No app or highlighted text was available.')
   }
 
   if (hasImage) {
-    parts.push('A screenshot is attached as a last resort. Prefer the thread text above.')
+    parts.push(
+      usedScreenFallback
+        ? 'A screenshot of the focused screen is attached because little text could be read. Read the visible chat, names, and messages from the image.'
+        : 'A screenshot is attached only as backup. Prefer the text and app context.'
+    )
   }
 
   parts.push(
-    'Be concise and practical. Draft from the thread text; do not ask the user to paste or send a picture.'
+    [
+      'Rules:',
+      '- Use the focused app, window title, URL, document, highlight, and nearby text as context.',
+      '- Highlighted text is the best source of facts when present. Do not invent numbers or visit other pages.',
+      '- If the quote says a percent used, say that percent and the remaining percent. Example: 86% used means about 14% left of that quota.',
+      draft
+        ? '- They asked for a draft. Put the sendable reply only inside a ```reply fenced block. One short message. No analysis inside the fence.'
+        : '- This is a question. Answer it. Do not draft a chat or email. Do not use a ```reply block.',
+      draft
+        ? '- If you explain first, keep that outside the ```reply block. Paste uses only that block.'
+        : '- Do not offer paste-ready alternatives unless they asked you to write a reply.',
+      '- If the context does not contain the answer, say exactly what it shows and what it does not.',
+      '- Never send a message.',
+      '- Do not ask the user to paste text or send a picture.'
+    ].join('\n')
   )
+
   return parts.join('\n\n')
 }
 
-function pickContext(live: ScreenContext, pinned?: ScreenContext): ScreenContext {
-  if (looksLikeMessage(live.text)) {
+function askIntent(note?: string): 'ask' | 'draft' {
+  const extra = note?.trim() ?? ''
+  if (!extra) {
+    return 'ask'
+  }
+  if (looksLikeQuestion(extra) && !/\b(draft|reply|respond|write back)\b/i.test(extra)) {
+    return 'ask'
+  }
+  if (wantsDraft(extra)) {
+    return 'draft'
+  }
+  return 'ask'
+}
+
+function wantsDraft(note: string): boolean {
+  return /\b(draft|reply|respond|write back|text them|write (them )?a (reply|message))\b/i.test(
+    note
+  )
+}
+
+function looksLikeQuestion(note: string): boolean {
+  return /^(how|what|why|who|when|where|is|are|can|does|do|did|should|explain|tell me|summarize|what's|whats)\b/i.test(
+    note
+  )
+}
+
+function pickContext(
+  live: ScreenContext,
+  pinned: ScreenContext | undefined,
+  appName: string
+): ScreenContext {
+  if (live.text.trim() || live.url || live.windowTitle || live.document) {
     return live
   }
-  if (pinned && live.text.trim().length < 80) {
-    return pinned
+  if (pinned && !isBrowserApp(appName)) {
+    return {
+      ...pinned,
+      appName: live.appName || pinned.appName,
+      windowTitle: live.windowTitle || pinned.windowTitle,
+      url: live.url || pinned.url
+    }
   }
-  return live.text.trim() ? live : (pinned ?? live)
+  return live
+}
+
+async function finishInsert(mode: 'paste' | 'reply'): Promise<void> {
+  const current = lastInsert
+  if (!current?.text.trim() || asking) {
+    return
+  }
+
+  hideJarvis()
+  setCursorWindowVisible(false)
+  try {
+    await insertDraft({
+      text: current.text,
+      appName: current.appName,
+      mode,
+      url: current.url,
+      windowTitle: current.windowTitle
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Could not insert the draft.'
+    const point = screen.getCursorScreenPoint()
+    showJarvis('answer', point)
+    sendJarvis({ status: 'error', text: message, appName: current.appName })
+  } finally {
+    if (active) {
+      setCursorWindowVisible(true)
+    }
+  }
+}
+
+function answerPayload(
+  text: string,
+  appName: string,
+  source?: ScreenContext['source'],
+  intent: 'ask' | 'draft' = 'ask'
+): JarvisPayload {
+  const drafting = intent === 'draft' && Boolean(text.trim())
+  return {
+    status: 'answer',
+    text,
+    appName,
+    source,
+    canInsert: drafting,
+    canReply: drafting
+  }
 }
 
 function composePayload(appName: string, context: ScreenContext, hasPin: boolean): JarvisPayload {
   const headline =
     [context.from, context.subject].filter(Boolean).join(' · ') ||
+    context.windowTitle ||
     context.title ||
+    context.url ||
+    context.document ||
     context.text.replace(/\s+/g, ' ').trim().slice(0, 120)
 
   const labels: Record<ScreenContext['source'], string> = {
     mail: 'Read from Mail',
     outlook: 'Read from Outlook',
     ax: 'Read from this window',
-    selection: 'Selected text',
+    selection: 'Highlighted',
+    clipboard: 'Clipboard',
     pin: 'Pinned thread',
+    app: context.appName ? `From ${context.appName}` : 'From this app',
     empty: hasPin ? 'Nothing here — using pin' : 'No text found'
   }
 
@@ -299,10 +603,15 @@ function composePayload(appName: string, context: ScreenContext, hasPin: boolean
 function showJarvisPulse(): void {
   const point = screen.getCursorScreenPoint()
   showJarvis('pulse', point)
-  sendJarvis({ status: 'pulse', text: '', appName: '' })
+  sendJarvis({
+    status: 'pulse',
+    text: companionEngine === 'system' ? 'System AI' : 'Cursor',
+    appName: '',
+    engine: companionEngine
+  })
 
   setTimeout(() => {
-    if (active && !asking && !composing) {
+    if (active && !asking && !composing && !picking) {
       hideJarvis()
     }
   }, 1800)

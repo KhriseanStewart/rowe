@@ -1,0 +1,17 @@
+name: "rowe-rag-context"
+version: 1
+description: "Compact System AI / OpenRouter prompt context to save credits"
+
+match:
+  command: "rowe-rag-context"
+
+pipeline:
+  - action: "strip_ansi"
+  - action: "remove_lines"
+    pattern: "^\\s*$"
+  - action: "truncate_lines"
+    max: 200
+  - action: "head"
+    n: 100
+
+on_error: "passthrough"

@@ -1,0 +1,16 @@
+{
+  "firestore": [
+    {
+      "database": "rowe",
+      "rules": "firestore.rules"
+    }
+  ],
+  "functions": [
+    {
+      "source": "functions",
+      "codebase": "rowe",
+      "ignore": ["node_modules", ".git", "firebase-debug.log", "*.local"],
+      "predeploy": ["npm --prefix functions run build"]
+    }
+  ]
+}

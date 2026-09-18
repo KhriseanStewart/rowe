@@ -1,8 +1,8 @@
-import { BrowserWindow, Menu, Tray, app, nativeImage, screen } from 'electron'
+import { BrowserWindow, Menu, Tray, app, globalShortcut, nativeImage, screen } from 'electron'
 import { join } from 'path'
 import icon from '../../resources/icon.png?asset'
 import { isCompanionActive, startCompanion, stopCompanion } from './companion'
-import { glassWindowOptions } from './platform'
+import { trayShowShortcut } from './platform'
 import { loadRenderer } from './renderer-url'
 
 let mainTray: Tray | undefined
@@ -19,12 +19,27 @@ export function setOpenAppHandler(handler: (() => void) | undefined): void {
 }
 
 const WINDOW_SIZE_DEFAULTS = {
-  width: 343,
-  height: 280,
+  width: 293,
+  height: 240,
+  expandedWidth: 420,
+  expandedHeight: 520,
   margin: {
-    x: 8,
-    y: 4
+    x: 14,
+    y: 14
   }
+}
+
+let trayExpanded = false
+
+export function toggleTrayExpanded(): boolean {
+  trayExpanded = !trayExpanded
+  alignWindow()
+  logWindowSize()
+  return trayExpanded
+}
+
+export function isTrayExpanded(): boolean {
+  return trayExpanded
 }
 
 export function initTray(): void {
@@ -32,7 +47,11 @@ export function initTray(): void {
     return
   }
 
-  const trayIcon = nativeImage.createFromPath(icon).resize({ width: 18, height: 18 })
+  const trayIcon = nativeImage.createFromPath(icon).resize({
+    width: process.platform === 'darwin' ? 22 : 16,
+    height: process.platform === 'darwin' ? 22 : 16,
+    quality: 'best'
+  })
   mainTray = new Tray(trayIcon)
   mainTray.setToolTip('Rowe')
   mainTray.on('right-click', () => {
@@ -47,12 +66,20 @@ export function initTray(): void {
 
   createTrayWindow()
 
+  const showShortcut = trayShowShortcut()
+  if (!globalShortcut.register(showShortcut, () => {
+    openTrayWindow()
+  })) {
+    console.error(`Could not register ${showShortcut}`)
+  }
+
   mainTray.on('click', () => {
     trayClickHandler?.()
     toggleTrayWindow()
   })
 
   app.on('before-quit', () => {
+    globalShortcut.unregister(showShortcut)
     mainTray?.destroy()
     mainTray = undefined
   })
@@ -64,17 +91,17 @@ function createTrayWindow(): void {
     height: WINDOW_SIZE_DEFAULTS.height,
     show: false,
     frame: false,
-    resizable: true,
-    minWidth: 320,
-    minHeight: 280,
+    // Transparent windows break on macOS when resizable is true.
+    resizable: false,
     movable: true,
     skipTaskbar: true,
     alwaysOnTop: true,
     fullscreenable: false,
     transparent: true,
-    hasShadow: true,
+    hasShadow: false,
     backgroundColor: '#00000000',
-    ...glassWindowOptions(),
+    // Panel is required on macOS to float above fullscreen apps / Spaces.
+    ...(process.platform === 'darwin' ? { type: 'panel' as const } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false
@@ -83,11 +110,6 @@ function createTrayWindow(): void {
 
   pinTrayWindow()
   logWindowSize()
-
-  trayWindow.on('resize', () => {
-    logWindowSize()
-  })
-
   loadRenderer(trayWindow, 'tray')
 
   trayWindow.on('closed', () => {
@@ -97,6 +119,7 @@ function createTrayWindow(): void {
 
 export function destroyTray(): void {
   hideTrayWindow()
+  globalShortcut.unregister(trayShowShortcut())
   if (trayWindow && !trayWindow.isDestroyed()) {
     trayWindow.close()
   }
@@ -162,6 +185,7 @@ function showTrayWindow(): void {
   }
 
   alignWindow()
+  trayWindow.setBackgroundColor('#00000000')
   trayWindow.show()
   pinTrayWindow()
   trayWindow.webContents.focus()
@@ -177,34 +201,37 @@ function logWindowSize(): void {
 }
 
 function pinTrayWindow(): void {
+  if (!trayWindow || trayWindow.isDestroyed()) {
+    return
+  }
+
+  // Panel + fullscreen-auxiliary collection behavior lets the HUD overlay Spaces/fullscreen.
+  trayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+  trayWindow.setAlwaysOnTop(true, 'screen-saver', 1)
+}
+
+function alignWindow(): void {
   if (!trayWindow) {
     return
   }
 
-  trayWindow.setAlwaysOnTop(true, 'screen-saver', 1)
-  trayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
-}
+  const display = mainTray
+    ? screen.getDisplayMatching(mainTray.getBounds())
+    : screen.getPrimaryDisplay()
+  const { workArea } = display
+  const width = trayExpanded ? WINDOW_SIZE_DEFAULTS.expandedWidth : WINDOW_SIZE_DEFAULTS.width
+  const height = trayExpanded ? WINDOW_SIZE_DEFAULTS.expandedHeight : WINDOW_SIZE_DEFAULTS.height
 
-function alignWindow(): void {
-  if (!trayWindow || !mainTray) {
-    return
-  }
+  const x = Math.round(workArea.x + WINDOW_SIZE_DEFAULTS.margin.x)
+  const y = Math.round(workArea.y + WINDOW_SIZE_DEFAULTS.margin.y)
 
-  const trayBounds = mainTray.getBounds()
-  const { width, height } = trayWindow.getBounds()
-  const { workArea } = screen.getDisplayMatching(trayBounds)
-
-  let x = workArea.x
-  let y = Math.round(trayBounds.y + trayBounds.height + WINDOW_SIZE_DEFAULTS.margin.y)
-
-  if (trayBounds.y > workArea.y + workArea.height / 2) {
-    y = Math.round(trayBounds.y - height - WINDOW_SIZE_DEFAULTS.margin.y)
-  }
-
-  x = Math.min(
-    Math.max(x, workArea.x + WINDOW_SIZE_DEFAULTS.margin.x),
-    workArea.x + workArea.width - width - WINDOW_SIZE_DEFAULTS.margin.x
+  trayWindow.setBounds(
+    {
+      x,
+      y,
+      width: Math.min(width, workArea.width - WINDOW_SIZE_DEFAULTS.margin.x * 2),
+      height: Math.min(height, workArea.height - WINDOW_SIZE_DEFAULTS.margin.y * 2)
+    },
+    false
   )
-
-  trayWindow.setPosition(x, y, false)
 }
